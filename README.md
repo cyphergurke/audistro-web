@@ -1,121 +1,118 @@
 # Web UI (Fan Playback)
 
-This folder contains the Next.js App Router frontend (`web`) for local fan playback testing.
+Next.js App Router frontend for fan playback, access payment flow, boosts, and spend transparency.
 
-## Prerequisites
+## Features
 
-- Docker + Docker Compose
-- Run commands from the repo root: `/home/goku/code/audiostr`
+- Playback via catalog-ranked providers with HLS fallback logic.
+- Adaptive access token flow:
+  - dev mode: direct `/v1/access/{assetId}`
+  - non-dev mode: invoice challenge -> poll token exchange.
+- Key retrieval via same-origin proxy route (`/api/hls-key/[assetId]`) for deterministic cookie + token handling.
+- Boost/tip flow with invoice + polling.
+- Boost history per asset.
+- Spend dashboard (`/me/spend`) using device-scoped FAP ledger entries.
+- Tokens stay in memory only. No token persistence in localStorage/sessionStorage.
 
-## First Start (Full Stack)
+## Main Pages
 
-Use this once (or when backend images also changed):
+- `/` home + player + recent assets.
+- `/asset/[assetId]` player, boost panel, boost history.
+- `/me/spend` fan transparency dashboard ("Where did my money go").
+- `/admin/payees` dev-only payee admin UI.
+
+## Main API Routes (Next.js)
+
+- Playback/HLS:
+  - `GET /api/playback/[assetId]`
+  - `GET /api/playlist/[assetId]`
+  - `GET /api/hls-key/[assetId]`
+- Access:
+  - `POST /api/device/bootstrap`
+  - `POST /api/access/[assetId]`
+  - `POST /api/access/token`
+  - `GET /api/access/grants?assetId=...`
+- Boost:
+  - `POST /api/boost`
+  - `GET /api/boost/[boostId]?assetId=...`
+  - `POST /api/boost/[boostId]/mark_paid?assetId=...` (dev-only in backend)
+  - `GET /api/boost/list?assetId=...`
+- Spend (device-scoped):
+  - `GET /api/me/ledger`
+  - `GET /api/me/spend-summary`
+
+## Environment
+
+Local example file: [`.env.local.example`](/home/goku/code/audiostr/web/.env.local.example)
+
+Important vars (server side):
+
+- `CATALOG_BASE_URL` (default `http://localhost:18080`)
+- `FAP_BASE_URL` (default `http://localhost:18081`)
+- `PROVIDER_INTERNAL_BASE_URL` (default `http://localhost:18082`)
+
+Dev admin vars:
+
+- `NEXT_PUBLIC_DEV_ADMIN=true`
+- `DEV_ADMIN_ALLOW_LNBITS_BASE_URLS=...`
+- `NEXT_PUBLIC_DEV_ADMIN_DEFAULT_LNBITS_BASE_URL=http://lnbits:5000`
+
+## Run With Docker Compose (Recommended)
+
+From repo root:
 
 ```bash
 docker compose up -d --build
 ```
 
-## Rebuild Only Web Container
-
-If you only changed files in `./web`, use:
+Only rebuild web service:
 
 ```bash
 docker compose up -d --no-deps --build web
 ```
 
-What this does:
-- rebuilds only the `web` image
-- recreates only the `web` container
-- does not rebuild/restart `audicatalog`, `fap`, or `audiprovider_*`
-
-## Restart Web Without Rebuild
+Restart web only:
 
 ```bash
 docker compose restart web
 ```
 
-## Common Web-Only Commands
-
-Check status:
-
-```bash
-docker compose ps web
-```
-
-Follow logs:
+Logs:
 
 ```bash
 docker compose logs -f web
 ```
 
-Open shell in container:
+## Run Web Locally (Without Dockerized web container)
 
 ```bash
-docker compose exec web sh
+cd web
+pnpm install
+pnpm dev
 ```
 
-Force clean rebuild for web (no cache):
+Then open: `http://localhost:3000`
+
+## Quality Checks
 
 ```bash
-docker compose build --no-cache web
-docker compose up -d --no-deps web
+cd web
+pnpm test
+pnpm typecheck
+pnpm build
 ```
 
-Stop/remove only web container:
+## Diagnostics / Smoke Scripts (repo root)
 
-```bash
-docker compose stop web
-docker compose rm -f web
-```
+- `./scripts/test-ui.sh`
+- `./scripts/smoke-e2e-playback.sh`
+- `./scripts/smoke-paid-access.sh`
+- `./scripts/check-provider-hls.sh http://localhost:18082/assets/asset1`
+- `./scripts/e2e-ui-provider-fallback.sh`
 
-## Provider HLS Diagnostic (No UI)
+## Security Notes
 
-Compare sequential vs parallel segment fetching directly against a provider:
-
-```bash
-./scripts/check-provider-hls.sh http://localhost:18082/assets/asset1
-```
-
-Try a known broken provider:
-
-```bash
-./scripts/check-provider-hls.sh http://localhost:18083/assets/asset1
-```
-
-End-to-end sequential fetch budget test (via `web` APIs: access + playback + playlist):
-
-```bash
-./scripts/e2e-sequential-fetch.sh
-```
-
-UI-style provider fallback + sequential fetch budget test:
-
-```bash
-./scripts/e2e-ui-provider-fallback.sh
-```
-
-Create more synthetic debug assets:
-
-```bash
-./scripts/create-more-debug-samples.sh
-```
-
-Import a local MP3/audio file and convert to HLS for streaming:
-
-```bash
-./scripts/import-mp3-sample.sh asset_mp3_1 ~/Music/demo.mp3
-```
-
-Notes:
-- The script writes HLS files to `audiprovider_eu_1` and seeds `audicatalog`.
-- Only asset metadata is persisted; tokens remain memory-only in the web app.
-
-## URLs
-
-- UI: `http://localhost:3000`
-- UI health endpoint: `http://localhost:3000/api/health`
-
-## Notes
-
-- Tokens are not persisted by the frontend.
-- Recent asset IDs may be stored in browser localStorage (asset IDs only).
+- Client never submits arbitrary upstream service URLs; server routes derive trusted targets.
+- Access tokens are in-memory only.
+- Recent library stores only asset IDs (no tokens/secrets).
+- Spend dashboard is scoped to current browser device identity (`fap_device_id` cookie).
