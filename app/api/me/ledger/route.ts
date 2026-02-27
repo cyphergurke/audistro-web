@@ -1,14 +1,14 @@
 import { getServerEnv } from "@/lib/env";
 import {
   fetchTextWithTimeout,
-  filterEntriesByWindow,
+  parseFromDays,
   ledgerRequestTimeoutMs,
   parseLedgerCursor,
   parseLedgerKind,
   parseLedgerLimit,
   parseLedgerListResponse,
   parseLedgerStatus,
-  parseUnixSeconds
+  resolveWindowTimestamps
 } from "@/lib/ledger";
 import { NextResponse } from "next/server";
 
@@ -24,14 +24,11 @@ export async function GET(req: Request): Promise<Response> {
     }
 
     const kind = parseLedgerKind(requestURL.searchParams.get("kind"));
-    const status = parseLedgerStatus(requestURL.searchParams.get("status"));
-    const limit = parseLedgerLimit(requestURL.searchParams.get("limit"));
+    const status = parseLedgerStatus(requestURL.searchParams.get("status")) ?? "paid";
+    const limit = parseLedgerLimit(requestURL.searchParams.get("limit"), 50);
     const cursor = parseLedgerCursor(requestURL.searchParams.get("cursor"));
-    const from = parseUnixSeconds(requestURL.searchParams.get("from"), "from");
-    const to = parseUnixSeconds(requestURL.searchParams.get("to"), "to");
-    if (from !== null && to !== null && from > to) {
-      throw new Error("from must be <= to");
-    }
+    const fromDays = parseFromDays(requestURL.searchParams.get("fromDays"));
+    const { from, to } = resolveWindowTimestamps(fromDays);
 
     const inboundCookie = req.headers.get("cookie") ?? "";
     const { fapBaseUrl } = getServerEnv();
@@ -69,19 +66,14 @@ export async function GET(req: Request): Promise<Response> {
     }
 
     const parsed = parseLedgerListResponse(upstream.text);
-    const filteredItems =
-      from !== null || to !== null
-        ? filterEntriesByWindow(
-            parsed.items,
-            from ?? Number.MIN_SAFE_INTEGER,
-            to ?? Number.MAX_SAFE_INTEGER
-          )
-        : parsed.items;
 
     const response = NextResponse.json(
       {
+        from_days: fromDays,
+        from,
+        to,
         device_id: parsed.device_id,
-        items: filteredItems,
+        items: parsed.items,
         next_cursor: parsed.next_cursor
       },
       {

@@ -1,36 +1,22 @@
 import { createHash } from "crypto";
-import type {
-  LedgerEntry,
-  LedgerKind,
-  LedgerListResponse,
-  LedgerStatus,
-  SpendSummaryTotals,
-  TopAssetSpend,
-  TopPayeeSpend
-} from "./types";
+import type { LedgerEntry, LedgerKind, LedgerListResponse, LedgerStatus } from "./types";
 
 const validKinds = new Set<LedgerKind>(["access", "boost"]);
 const validStatuses = new Set<LedgerStatus>(["pending", "paid", "expired", "failed", "refunded"]);
 const assetIDPattern = /^[a-zA-Z0-9_-]{1,128}$/;
 
-export const defaultLedgerLimit = 20;
+export const defaultLedgerLimit = 50;
 export const maxLedgerLimit = 100;
 export const ledgerRequestTimeoutMs = 5000;
 export const spendSummaryMaxPages = 10;
 export const spendSummaryTopLimit = 20;
 
-export type SpendAggregation = {
-  totals: SpendSummaryTotals;
-  byAssetID: Map<string, number>;
-  byPayeeID: Map<string, number>;
-  paidItemsCount: number;
-};
+export type WindowDays = 7 | 30;
 
-export type AssetLabel = {
+export type AssetPlaybackLabel = {
   asset_id: string;
   title?: string;
-  artist_handle?: string;
-  artist_display_name?: string;
+  artist?: string;
 };
 
 function parseRecord(payloadText: string): Record<string, unknown> {
@@ -103,10 +89,10 @@ export function parseLedgerCursor(value: string | null): string | null {
   return raw;
 }
 
-export function parseLedgerLimit(value: string | null): number {
+export function parseLedgerLimit(value: string | null, fallback = defaultLedgerLimit): number {
   const raw = value?.trim() ?? "";
   if (!raw) {
-    return defaultLedgerLimit;
+    return fallback;
   }
   const parsed = Number.parseInt(raw, 10);
   if (!Number.isFinite(parsed) || parsed <= 0) {
@@ -115,35 +101,21 @@ export function parseLedgerLimit(value: string | null): number {
   return Math.min(parsed, maxLedgerLimit);
 }
 
-export function parseUnixSeconds(value: string | null, fieldName: string): number | null {
+export function parseFromDays(value: string | null): WindowDays {
   const raw = value?.trim() ?? "";
-  if (!raw) {
-    return null;
+  if (!raw || raw === "30") {
+    return 30;
   }
-  const parsed = Number.parseInt(raw, 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    throw new Error(`${fieldName} must be unix seconds`);
+  if (raw === "7") {
+    return 7;
   }
-  return parsed;
+  throw new Error("fromDays must be 7 or 30");
 }
 
-export function resolveTimeWindow(
-  fromRaw: string | null,
-  toRaw: string | null,
-  defaultWindowSeconds: number
-): { from: number; to: number } {
-  const now = Math.floor(Date.now() / 1000);
-  const from = parseUnixSeconds(fromRaw, "from");
-  const to = parseUnixSeconds(toRaw, "to");
-  const resolvedTo = to ?? now;
-  const resolvedFrom = from ?? Math.max(1, resolvedTo - defaultWindowSeconds);
-  if (resolvedFrom > resolvedTo) {
-    throw new Error("from must be <= to");
-  }
-  return {
-    from: resolvedFrom,
-    to: resolvedTo
-  };
+export function resolveWindowTimestamps(windowDays: WindowDays): { from: number; to: number } {
+  const to = Math.floor(Date.now() / 1000);
+  const from = Math.max(1, to - windowDays * 24 * 60 * 60);
+  return { from, to };
 }
 
 export function isValidAssetID(value: string): boolean {
@@ -155,7 +127,6 @@ function parseLedgerEntry(rawValue: unknown): LedgerEntry | null {
     return null;
   }
   const raw = rawValue as Record<string, unknown>;
-
   const entryID = typeof raw.entry_id === "string" ? raw.entry_id.trim() : "";
   const kind = typeof raw.kind === "string" ? raw.kind.trim() : "";
   const status = typeof raw.status === "string" ? raw.status.trim() : "";
@@ -225,7 +196,7 @@ export function parseLedgerListResponse(payloadText: string): LedgerListResponse
   }
 
   return {
-    device_id: deviceID,
+    device_id: deviceID || undefined,
     items,
     next_cursor: nextCursor || undefined
   };
@@ -237,85 +208,6 @@ export function filterEntriesByWindow(
   toInclusive: number
 ): LedgerEntry[] {
   return items.filter((item) => item.created_at >= fromInclusive && item.created_at <= toInclusive);
-}
-
-export function aggregatePaidEntries(items: LedgerEntry[]): SpendAggregation {
-  let accessTotal = 0;
-  let boostTotal = 0;
-  const byAssetID = new Map<string, number>();
-  const byPayeeID = new Map<string, number>();
-  let paidItemsCount = 0;
-
-  for (const item of items) {
-    if (item.status !== "paid") {
-      continue;
-    }
-    paidItemsCount += 1;
-    if (item.kind === "access") {
-      accessTotal += item.amount_msat;
-    } else if (item.kind === "boost") {
-      boostTotal += item.amount_msat;
-    }
-    byPayeeID.set(item.payee_id, (byPayeeID.get(item.payee_id) ?? 0) + item.amount_msat);
-    if (item.asset_id) {
-      byAssetID.set(item.asset_id, (byAssetID.get(item.asset_id) ?? 0) + item.amount_msat);
-    }
-  }
-
-  return {
-    totals: {
-      total_paid_msat_access: accessTotal,
-      total_paid_msat_boost: boostTotal,
-      total_paid_msat_all: accessTotal + boostTotal
-    },
-    byAssetID,
-    byPayeeID,
-    paidItemsCount
-  };
-}
-
-function sortByAmountDesc<T extends { amount_msat: number }>(items: T[]): T[] {
-  return [...items].sort((a, b) => {
-    if (b.amount_msat !== a.amount_msat) {
-      return b.amount_msat - a.amount_msat;
-    }
-    return 0;
-  });
-}
-
-export function buildTopAssets(
-  byAssetID: Map<string, number>,
-  assetLabels: Map<string, AssetLabel>
-): TopAssetSpend[] {
-  const items: TopAssetSpend[] = [];
-  for (const [assetID, amountMSat] of byAssetID.entries()) {
-    const label = assetLabels.get(assetID);
-    items.push({
-      asset_id: assetID,
-      title: label?.title,
-      artist_handle: label?.artist_handle,
-      artist_display_name: label?.artist_display_name,
-      amount_msat: amountMSat
-    });
-  }
-  return sortByAmountDesc(items).slice(0, spendSummaryTopLimit);
-}
-
-export function buildTopPayees(
-  byPayeeID: Map<string, number>,
-  payeeArtistLabels: Map<string, { artist_handle?: string; artist_display_name?: string }>
-): TopPayeeSpend[] {
-  const items: TopPayeeSpend[] = [];
-  for (const [payeeID, amountMSat] of byPayeeID.entries()) {
-    const label = payeeArtistLabels.get(payeeID);
-    items.push({
-      payee_id: payeeID,
-      amount_msat: amountMSat,
-      artist_handle: label?.artist_handle,
-      artist_display_name: label?.artist_display_name
-    });
-  }
-  return sortByAmountDesc(items).slice(0, spendSummaryTopLimit);
 }
 
 export async function fetchTextWithTimeout(
@@ -346,31 +238,31 @@ export function hashCookieForCache(cookieHeader: string): string {
   return createHash("sha256").update(cookieHeader).digest("hex");
 }
 
-export function parseAssetLookupLabel(payloadText: string): AssetLabel {
+export function parsePlaybackLabel(payloadText: string, expectedAssetID: string): AssetPlaybackLabel {
   const parsed = parseRecord(payloadText);
-  const asset = typeof parsed.asset === "object" && parsed.asset !== null ? parsed.asset : null;
-  const artist = typeof parsed.artist === "object" && parsed.artist !== null ? parsed.artist : null;
-  if (!asset) {
-    throw new Error("asset lookup payload is invalid");
+  const assetRaw = parsed.asset;
+  if (typeof assetRaw !== "object" || assetRaw === null) {
+    throw new Error("playback payload is invalid");
   }
-  const assetRecord = asset as Record<string, unknown>;
-  const artistRecord = artist as Record<string, unknown> | null;
-  const assetID = typeof assetRecord.asset_id === "string" ? assetRecord.asset_id.trim() : "";
-  if (!isValidAssetID(assetID)) {
-    throw new Error("asset lookup payload is invalid");
+  const asset = assetRaw as Record<string, unknown>;
+  const assetID = typeof asset.asset_id === "string" ? asset.asset_id.trim() : "";
+  if (assetID === "" || (expectedAssetID !== "" && assetID !== expectedAssetID)) {
+    throw new Error("playback asset mismatch");
   }
-  const title = typeof assetRecord.title === "string" ? assetRecord.title.trim() : undefined;
-  const artistHandle =
-    artistRecord && typeof artistRecord.handle === "string" ? artistRecord.handle.trim() : undefined;
-  const artistDisplayName =
-    artistRecord && typeof artistRecord.display_name === "string"
-      ? artistRecord.display_name.trim()
-      : undefined;
 
+  const title = typeof asset.title === "string" ? asset.title.trim() : "";
+  const artistRaw = parsed.artist;
+  let artist = "";
+  if (typeof artistRaw === "object" && artistRaw !== null) {
+    const artistRecord = artistRaw as Record<string, unknown>;
+    const handle = typeof artistRecord.handle === "string" ? artistRecord.handle.trim() : "";
+    const displayName =
+      typeof artistRecord.display_name === "string" ? artistRecord.display_name.trim() : "";
+    artist = displayName || (handle ? `@${handle}` : "");
+  }
   return {
     asset_id: assetID,
     title: title || undefined,
-    artist_handle: artistHandle || undefined,
-    artist_display_name: artistDisplayName || undefined
+    artist: artist || undefined
   };
 }

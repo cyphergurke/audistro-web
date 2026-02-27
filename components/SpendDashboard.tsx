@@ -82,20 +82,19 @@ export function SpendDashboard() {
   const [summary, setSummary] = useState<SpendSummaryResponse | null>(null);
   const [recentEntries, setRecentEntries] = useState<LedgerEntry[]>([]);
   const [state, setState] = useState<LoadState>({ kind: "idle" });
+  const [bootstrapReady, setBootstrapReady] = useState<boolean>(false);
 
+  const fromDays = useMemo(() => (windowKey === "7d" ? 7 : 30), [windowKey]);
   const windowRange = useMemo(() => {
     const to = unixNow();
-    return {
-      from: to - windowSeconds[windowKey],
-      to
-    };
+    return { from: to - windowSeconds[windowKey], to };
   }, [windowKey]);
 
   const load = async (): Promise<void> => {
     setState({ kind: "loading" });
     try {
-      const summaryURL = `/api/me/spend-summary?from=${windowRange.from}&to=${windowRange.to}`;
-      const ledgerURL = `/api/me/ledger?status=paid&limit=20&from=${windowRange.from}&to=${windowRange.to}`;
+      const summaryURL = `/api/me/spend-summary?fromDays=${fromDays}`;
+      const ledgerURL = `/api/me/ledger?fromDays=${fromDays}&limit=20`;
       const [summaryPayload, ledgerPayload] = await Promise.all([
         fetchJSON<SpendSummaryResponse>(summaryURL),
         fetchJSON<LedgerListResponse>(ledgerURL)
@@ -106,16 +105,36 @@ export function SpendDashboard() {
     } catch (err: unknown) {
       setSummary(null);
       setRecentEntries([]);
+      const message = toErrorMessage(err);
+      const normalized = message.toLowerCase();
       setState({
         kind: "error",
-        message: toErrorMessage(err)
+        message: normalized.includes("device_required")
+          ? "Open any asset and press Play once to initialize device identity."
+          : message
       });
     }
   };
 
   useEffect(() => {
+    void (async () => {
+      try {
+        await fetch("/api/device/bootstrap", {
+          method: "POST",
+          cache: "no-store"
+        });
+      } finally {
+        setBootstrapReady(true);
+      }
+    })();
+  }, []);
+
+  useEffect(() => {
+    if (!bootstrapReady) {
+      return;
+    }
     void load();
-  }, [windowKey]);
+  }, [windowKey, bootstrapReady]);
 
   return (
     <section className="space-y-4 text-sm text-slate-200">
@@ -151,8 +170,15 @@ export function SpendDashboard() {
       </div>
 
       <p className="text-xs text-slate-400">
-        Window: {unixTimestampToLocal(windowRange.from)} - {unixTimestampToLocal(windowRange.to)}
+        Window: last {fromDays} days ({unixTimestampToLocal(windowRange.from)} -{" "}
+        {unixTimestampToLocal(windowRange.to)})
       </p>
+
+      {summary?.truncated ? (
+        <p className="rounded-md border border-amber-500/50 bg-amber-950/40 p-2 text-xs text-amber-200">
+          Summary truncated: maximum page limit reached. Narrow the window for full precision.
+        </p>
+      ) : null}
 
       {state.kind === "error" ? (
         <p className="rounded-md border border-rose-500/50 bg-rose-950/40 p-3 text-rose-200">
@@ -164,28 +190,28 @@ export function SpendDashboard() {
         <article className="rounded-lg border border-slate-800 bg-slate-900/40 p-3">
           <p className="text-xs uppercase tracking-wide text-slate-400">Access Total</p>
           <p className="mt-1 text-lg font-semibold">
-            {summary ? formatSats(summary.totals.total_paid_msat_access) : "-"}
+            {summary ? formatSats(summary.totals.paid_msat_access) : "-"}
           </p>
           <p className="text-xs text-slate-400">
-            {summary ? formatMSat(summary.totals.total_paid_msat_access) : "-"}
+            {summary ? formatMSat(summary.totals.paid_msat_access) : "-"}
           </p>
         </article>
         <article className="rounded-lg border border-slate-800 bg-slate-900/40 p-3">
           <p className="text-xs uppercase tracking-wide text-slate-400">Boost Total</p>
           <p className="mt-1 text-lg font-semibold">
-            {summary ? formatSats(summary.totals.total_paid_msat_boost) : "-"}
+            {summary ? formatSats(summary.totals.paid_msat_boost) : "-"}
           </p>
           <p className="text-xs text-slate-400">
-            {summary ? formatMSat(summary.totals.total_paid_msat_boost) : "-"}
+            {summary ? formatMSat(summary.totals.paid_msat_boost) : "-"}
           </p>
         </article>
         <article className="rounded-lg border border-slate-800 bg-slate-900/40 p-3">
           <p className="text-xs uppercase tracking-wide text-slate-400">Total Paid</p>
           <p className="mt-1 text-lg font-semibold">
-            {summary ? formatSats(summary.totals.total_paid_msat_all) : "-"}
+            {summary ? formatSats(summary.totals.paid_msat_total) : "-"}
           </p>
           <p className="text-xs text-slate-400">
-            {summary ? formatMSat(summary.totals.total_paid_msat_all) : "-"}
+            {summary ? formatMSat(summary.totals.paid_msat_total) : "-"}
           </p>
         </article>
       </div>
@@ -208,8 +234,7 @@ export function SpendDashboard() {
                 </p>
                 <p className="text-xs text-slate-400">
                   asset_id={item.asset_id}
-                  {item.artist_handle ? ` | artist=@${item.artist_handle}` : ""}
-                  {item.artist_display_name ? ` (${item.artist_display_name})` : ""}
+                  {item.artist ? ` | artist=${item.artist}` : ""}
                 </p>
                 <p className="text-xs text-slate-400">
                   {formatSats(item.amount_msat)} ({formatMSat(item.amount_msat)})
@@ -229,12 +254,6 @@ export function SpendDashboard() {
             {summary.top_payees.map((item) => (
               <li key={item.payee_id} className="rounded border border-slate-700 p-2">
                 <p>{item.payee_id}</p>
-                {(item.artist_handle || item.artist_display_name) && (
-                  <p className="text-xs text-slate-400">
-                    {item.artist_handle ? `@${item.artist_handle}` : ""}
-                    {item.artist_display_name ? ` ${item.artist_display_name}` : ""}
-                  </p>
-                )}
                 <p className="text-xs text-slate-400">
                   {formatSats(item.amount_msat)} ({formatMSat(item.amount_msat)})
                 </p>

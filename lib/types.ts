@@ -115,31 +115,28 @@ export type LedgerListResponse = {
 };
 
 export type SpendSummaryTotals = {
-  total_paid_msat_access: number;
-  total_paid_msat_boost: number;
-  total_paid_msat_all: number;
+  paid_msat_access: number;
+  paid_msat_boost: number;
+  paid_msat_total: number;
 };
 
 export type TopAssetSpend = {
   asset_id: string;
   title?: string;
-  artist_handle?: string;
-  artist_display_name?: string;
+  artist?: string;
   amount_msat: number;
 };
 
 export type TopPayeeSpend = {
   payee_id: string;
   amount_msat: number;
-  artist_handle?: string;
-  artist_display_name?: string;
 };
 
 export type SpendSummaryResponse = {
-  from: number;
-  to: number;
+  window_days: 7 | 30;
   totals: SpendSummaryTotals;
   top_assets: TopAssetSpend[];
   top_payees: TopPayeeSpend[];
   items_count: number;
+  truncated: boolean;
 };
