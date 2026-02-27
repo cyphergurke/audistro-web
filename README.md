@@ -43,7 +43,7 @@ Next.js App Router frontend for fan playback, access payment flow, boosts, and s
 
 ## Environment
 
-Local example file: [`.env.local.example`](/home/goku/code/audiostr/web/.env.local.example)
+Local example file: [`.env.local.example`](.env.local.example)
 
 Important vars (server side):
 
