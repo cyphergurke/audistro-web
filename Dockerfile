@@ -4,7 +4,8 @@ RUN npm install -g pnpm
 FROM base AS deps
 WORKDIR /app
 COPY package.json pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
+    sh -lc 'for attempt in 1 2 3 4 5; do pnpm install --frozen-lockfile && exit 0; sleep $((attempt * 2)); done; exit 1'
 
 FROM base AS builder
 WORKDIR /app
