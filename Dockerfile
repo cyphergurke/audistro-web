@@ -4,8 +4,9 @@ FROM node:24-bookworm-slim AS base
 ENV PNPM_HOME=/pnpm
 ENV PNPM_STORE_DIR=/pnpm/store
 ENV PATH=${PNPM_HOME}:${PATH}
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 WORKDIR /app
-RUN npm install -g pnpm@10.9.2
+RUN corepack enable
 
 FROM base AS deps
 COPY package.json pnpm-lock.yaml ./
