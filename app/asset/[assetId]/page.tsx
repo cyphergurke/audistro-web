@@ -36,6 +36,7 @@ export default async function AssetPage({ params }: PageProps) {
           <Player
             initialAssetId={assetId}
             showValidateButton
+            showEncryptedPreflightButton
             showAccessStatus
             bootstrapDeviceOnMount
           />

@@ -1,12 +1,12 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { AdminPayeesForm } from "@/components/AdminPayeesForm";
+import { AdminBootstrapForm } from "@/components/AdminBootstrapForm";
 import { BackgroundGradient } from "@/components/ui/background-gradient";
 import { isDevAdminEnabled } from "@/lib/devAdmin";
 
 export const dynamic = "force-dynamic";
 
-export default function AdminPayeesPage() {
+export default function AdminBootstrapPage() {
   if (!isDevAdminEnabled()) {
     notFound();
   }
@@ -22,12 +22,17 @@ export default function AdminPayeesPage() {
         <section className="space-y-5 p-6 md:p-8">
           <div className="space-y-1">
             <p className="text-xs uppercase tracking-[0.2em] text-cyan-300/80">Dev Admin</p>
-            <h1 className="text-2xl font-semibold text-slate-100 md:text-3xl">/admin/payees</h1>
-            <Link href="/" className="text-sm text-cyan-300 underline-offset-2 hover:underline">
-              Back to home
-            </Link>
+            <h1 className="text-2xl font-semibold text-slate-100 md:text-3xl">/admin/bootstrap</h1>
+            <div className="flex gap-4 text-sm text-cyan-300">
+              <Link href="/" className="underline-offset-2 hover:underline">
+                Back to home
+              </Link>
+              <Link href="/admin/upload" className="underline-offset-2 hover:underline">
+                Upload assets
+              </Link>
+            </div>
           </div>
-          <AdminPayeesForm
+          <AdminBootstrapForm
             defaultFAPPublicBaseURL={defaultFAPPublicBaseURL}
             defaultLNBitsBaseURL={defaultLNBitsBaseURL}
           />

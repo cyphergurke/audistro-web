@@ -4,6 +4,17 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import QRCode from "qrcode";
 import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  absolutizePlaylistReference,
+  createEncryptedPreflightSteps,
+  extractEncryptedKeyUri,
+  extractFirstMediaReference,
+  type EncryptedPreflightBundle,
+  type EncryptedPreflightCheckStatus,
+  type EncryptedPreflightProviderResult,
+  type EncryptedPreflightStep,
+  type EncryptedPreflightStepID
+} from "@/lib/encryptedPlaybackPreflight";
 import { PlayerEngine } from "@/lib/playerEngine";
 import { addRecent, clearRecent, isValidAssetId, loadRecent } from "@/lib/recentAssets";
 import type { DebugSnapshot, PlayerStatus, TokenProvider } from "@/lib/playerTypes";
@@ -19,6 +30,7 @@ type PlayerProps = {
   initialAssetId?: string;
   showOpenButton?: boolean;
   showValidateButton?: boolean;
+  showEncryptedPreflightButton?: boolean;
   showRecentList?: boolean;
   showAccessStatus?: boolean;
   bootstrapDeviceOnMount?: boolean;
@@ -51,6 +63,13 @@ type AccessGrantState =
   | { kind: "ready"; grant: AccessGrant; updatedAt: number }
   | { kind: "error"; message: string };
 
+type EncryptedPreflightState = {
+  status: EncryptedPreflightCheckStatus;
+  steps: EncryptedPreflightStep[];
+  bundle: EncryptedPreflightBundle | null;
+  summary: string | null;
+};
+
 const progressByStatus: Record<PlayerStatus, number> = {
   Idle: 0,
   LoadingPlayback: 10,
@@ -74,6 +93,40 @@ function createInitialDebug(assetId: string): DebugSnapshot {
     errors: [],
     attemptLogs: []
   };
+}
+
+function createInitialEncryptedPreflightState(): EncryptedPreflightState {
+  return {
+    status: "idle",
+    steps: createEncryptedPreflightSteps(),
+    bundle: null,
+    summary: null
+  };
+}
+
+function updateEncryptedPreflightStep(
+  steps: EncryptedPreflightStep[],
+  stepId: EncryptedPreflightStepID,
+  status: EncryptedPreflightCheckStatus,
+  message?: string
+): EncryptedPreflightStep[] {
+  return steps.map((step) =>
+    step.id === stepId
+      ? {
+          ...step,
+          status,
+          message
+        }
+      : step
+  );
+}
+
+function isProviderPreflightPass(result: EncryptedPreflightProviderResult): boolean {
+  return (
+    result.playlistStatus === "pass" &&
+    result.keyStatus === "pass" &&
+    result.segmentStatus === "pass"
+  );
 }
 
 function toErrorMessage(err: unknown): string {
@@ -153,6 +206,7 @@ export function Player({
   initialAssetId,
   showOpenButton = false,
   showValidateButton = false,
+  showEncryptedPreflightButton = false,
   showRecentList = false,
   showAccessStatus = false,
   bootstrapDeviceOnMount = false,
@@ -171,16 +225,23 @@ export function Player({
   const [debugSnapshot, setDebugSnapshot] = useState<DebugSnapshot>(
     createInitialDebug(initialInputAssetId)
   );
+  const [encryptedPreflightState, setEncryptedPreflightState] = useState<EncryptedPreflightState>(
+    createInitialEncryptedPreflightState()
+  );
   const [accessInvoice, setAccessInvoice] = useState<AccessInvoiceState | null>(null);
   const [accessInvoiceQR, setAccessInvoiceQR] = useState<string | null>(null);
   const [accessGrantState, setAccessGrantState] = useState<AccessGrantState>({ kind: "idle" });
+  const [preflightCopied, setPreflightCopied] = useState<boolean>(false);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const engineRef = useRef<PlayerEngine | null>(null);
   const activePlaybackAssetIdRef = useRef<string>(initialInputAssetId);
   const playRequestInFlightRef = useRef<boolean>(false);
+  const preflightInFlightRef = useRef<boolean>(false);
   const challengeByAssetRef = useRef<Map<string, string>>(new Map<string, string>());
   const bootstrapPromiseRef = useRef<Promise<void> | null>(null);
+  const isEncryptedPreflightEnabled =
+    showEncryptedPreflightButton && process.env.NEXT_PUBLIC_DEV_ADMIN === "true";
 
   const progress = useMemo(() => progressByStatus[status], [status]);
   const isBusy =
@@ -194,6 +255,7 @@ export function Player({
     const next = (initialAssetId ?? defaultAssetId).trim();
     setAssetId(next);
     setDebugSnapshot(createInitialDebug(next));
+    setEncryptedPreflightState(createInitialEncryptedPreflightState());
     setLookupState({ kind: "idle" });
   }, [defaultAssetId, initialAssetId]);
 
@@ -344,6 +406,7 @@ export function Player({
 
   const handleReset = (): void => {
     playRequestInFlightRef.current = false;
+    preflightInFlightRef.current = false;
     engineRef.current?.stop();
     engineRef.current = null;
     setError(null);
@@ -355,6 +418,7 @@ export function Player({
     updateStatus("Idle");
     setLookupState({ kind: "idle" });
     setDebugSnapshot(createInitialDebug(assetId.trim()));
+    setEncryptedPreflightState(createInitialEncryptedPreflightState());
   };
 
   const handleValidate = async (): Promise<void> => {
@@ -554,6 +618,249 @@ export function Player({
     };
   };
 
+  const copyEncryptedPreflightJson = async (): Promise<void> => {
+    if (!encryptedPreflightState.bundle) {
+      return;
+    }
+    await navigator.clipboard.writeText(JSON.stringify(encryptedPreflightState.bundle, null, 2));
+    setPreflightCopied(true);
+    window.setTimeout(() => setPreflightCopied(false), 1200);
+  };
+
+  const handleEncryptedPlaybackPreflight = async (): Promise<void> => {
+    if (!isEncryptedPreflightEnabled || preflightInFlightRef.current) {
+      return;
+    }
+
+    const normalizedAssetId = assetId.trim();
+    if (!isValidAssetId(normalizedAssetId)) {
+      setEncryptedPreflightState({
+        status: "fail",
+        steps: updateEncryptedPreflightStep(
+          createEncryptedPreflightSteps(),
+          "playback",
+          "fail",
+          "assetId must match ^[a-zA-Z0-9_-]{1,128}$"
+        ),
+        bundle: null,
+        summary: "invalid asset id"
+      });
+      return;
+    }
+
+    preflightInFlightRef.current = true;
+    setError(null);
+    setEncryptedPreflightState({
+      status: "running",
+      steps: createEncryptedPreflightSteps().map((step) => ({
+        ...step,
+        status: step.id === "playback" ? "running" : "idle"
+      })),
+      bundle: null,
+      summary: "running encrypted playback preflight"
+    });
+
+    const startedAt = Date.now();
+    let steps = createEncryptedPreflightSteps();
+    const applyStep = (
+      stepId: EncryptedPreflightStepID,
+      status: EncryptedPreflightCheckStatus,
+      message?: string
+    ): void => {
+      steps = updateEncryptedPreflightStep(steps, stepId, status, message);
+      setEncryptedPreflightState((previous) => ({
+        status: previous.status === "fail" ? "fail" : "running",
+        steps,
+        bundle: previous.bundle,
+        summary: previous.summary
+      }));
+    };
+
+    try {
+      await ensureDeviceBootstrap();
+
+      const playback = await fetchJSON<PlaybackResponse>(
+        `/api/playback/${encodeURIComponent(normalizedAssetId)}`
+      );
+      if (playback.providers.length === 0) {
+        throw new Error("no playback providers available");
+      }
+      applyStep("playback", "pass", `${playback.providers.length} providers returned`);
+
+      applyStep("token", "running", "resolving access token");
+      const tokenProvider = createAdaptiveTokenProvider();
+      const token = await tokenProvider.getToken(normalizedAssetId);
+      applyStep("token", "pass", `token expires at ${formatUnixTimestamp(token.expiresAt)}`);
+
+      const providerResults: EncryptedPreflightProviderResult[] = [];
+      let anyPlaylistPass = false;
+      let anyKeyPass = false;
+      let anySegmentPass = false;
+
+      for (const provider of playback.providers) {
+        const playlistUrl = `/api/playlist/${encodeURIComponent(normalizedAssetId)}?providerId=${encodeURIComponent(
+          provider.provider_id
+        )}&token=${encodeURIComponent(token.token)}`;
+        const providerResult: EncryptedPreflightProviderResult = {
+          providerId: provider.provider_id,
+          baseUrl: provider.base_url,
+          playlistUrl,
+          playlistStatus: "fail",
+          keyUri: null,
+          keyStatus: "skipped",
+          keyLength: null,
+          segmentUrl: null,
+          segmentStatus: "skipped"
+        };
+
+        const playlistResponse = await fetch(playlistUrl, {
+          method: "GET",
+          cache: "no-store"
+        });
+        const playlistText = await playlistResponse.text();
+        if (!playlistResponse.ok) {
+          providerResult.playlistMessage =
+            parseLookupErrorBody(playlistText) || `playlist fetch failed (${playlistResponse.status})`;
+          providerResults.push(providerResult);
+          continue;
+        }
+        providerResult.playlistStatus = "pass";
+        providerResult.playlistMessage = `playlist ok via ${playlistResponse.headers.get("x-playlist-upstream") ?? "upstream"}`;
+        anyPlaylistPass = true;
+
+        const keyUri = extractEncryptedKeyUri(playlistText);
+        providerResult.keyUri = keyUri;
+        if (!keyUri) {
+          providerResult.keyStatus = "fail";
+          providerResult.keyMessage = "playlist missing EXT-X-KEY URI";
+        } else {
+          const resolvedKeyUrl = new URL(keyUri, window.location.origin);
+          const expectedKeyPath = `/api/hls-key/${encodeURIComponent(normalizedAssetId)}`;
+          if (resolvedKeyUrl.pathname !== expectedKeyPath) {
+            providerResult.keyStatus = "fail";
+            providerResult.keyMessage = `unexpected key uri ${resolvedKeyUrl.pathname}`;
+          } else {
+            const keyResponse = await fetch(resolvedKeyUrl.toString(), {
+              method: "GET",
+              cache: "no-store",
+              credentials: "same-origin"
+            });
+            if (!keyResponse.ok) {
+              const keyText = await keyResponse.text();
+              providerResult.keyStatus = "fail";
+              providerResult.keyMessage =
+                parseLookupErrorBody(keyText) || `key fetch failed (${keyResponse.status})`;
+            } else {
+              const keyBytes = await keyResponse.arrayBuffer();
+              providerResult.keyLength = keyBytes.byteLength;
+              if (keyBytes.byteLength !== 16) {
+                providerResult.keyStatus = "fail";
+                providerResult.keyMessage = `expected 16-byte key, got ${keyBytes.byteLength}`;
+              } else {
+                providerResult.keyStatus = "pass";
+                providerResult.keyMessage = "16-byte key fetched";
+                anyKeyPass = true;
+              }
+            }
+          }
+        }
+
+        const firstSegmentRef = extractFirstMediaReference(playlistText);
+        if (!firstSegmentRef) {
+          providerResult.segmentStatus = "fail";
+          providerResult.segmentMessage = "playlist missing media segment";
+          providerResults.push(providerResult);
+          continue;
+        }
+
+        providerResult.segmentUrl = absolutizePlaylistReference(firstSegmentRef, playlistUrl);
+        const segmentResponse = await fetch(providerResult.segmentUrl, {
+          method: "GET",
+          cache: "no-store"
+        });
+        if (!segmentResponse.ok) {
+          providerResult.segmentStatus = "fail";
+          providerResult.segmentMessage = `segment fetch failed (${segmentResponse.status})`;
+        } else {
+          providerResult.segmentStatus = "pass";
+          providerResult.segmentMessage = "segment fetch ok";
+          anySegmentPass = true;
+        }
+
+        providerResults.push(providerResult);
+      }
+
+      applyStep(
+        "playlist",
+        anyPlaylistPass ? "pass" : "fail",
+        anyPlaylistPass ? "at least one provider playlist fetched" : "no provider playlist fetched"
+      );
+      applyStep(
+        "key",
+        anyKeyPass ? "pass" : "fail",
+        anyKeyPass ? "key proxy returned 16 bytes" : "no provider key fetch succeeded"
+      );
+      applyStep(
+        "segment",
+        anySegmentPass ? "pass" : "fail",
+        anySegmentPass ? "at least one first segment fetched" : "no provider segment fetch succeeded"
+      );
+
+      const firstProviderPassed =
+        providerResults.length > 0 && isProviderPreflightPass(providerResults[0]);
+      const laterProviderPassed = providerResults.slice(1).some((result) => isProviderPreflightPass(result));
+      const fallbackReady = firstProviderPassed || laterProviderPassed;
+
+      if (firstProviderPassed) {
+        applyStep("fallback", "pass", "primary provider healthy");
+      } else if (laterProviderPassed) {
+        applyStep("fallback", "pass", "primary provider failed, fallback provider healthy");
+      } else {
+        applyStep("fallback", "fail", "no healthy fallback provider");
+      }
+
+      const overallPass =
+        anyPlaylistPass &&
+        anyKeyPass &&
+        anySegmentPass &&
+        (firstProviderPassed || laterProviderPassed);
+      const bundle: EncryptedPreflightBundle = {
+        assetId: normalizedAssetId,
+        startedAt,
+        finishedAt: Date.now(),
+        tokenExpiresAt: token.expiresAt,
+        playbackProviders: playback.providers.map((provider) => ({
+          providerId: provider.provider_id,
+          baseUrl: provider.base_url
+        })),
+        providers: providerResults,
+        fallbackReady
+      };
+
+      setEncryptedPreflightState({
+        status: overallPass ? "pass" : "fail",
+        steps,
+        bundle,
+        summary: overallPass
+          ? "encrypted playback preflight passed"
+          : "encrypted playback preflight failed"
+      });
+    } catch (err: unknown) {
+      const message = toErrorMessage(err);
+      const failedSteps = steps.some((step) => step.status === "fail")
+        ? steps
+        : updateEncryptedPreflightStep(steps, "playback", "fail", message);
+      setEncryptedPreflightState({
+        status: "fail",
+        steps: failedSteps,
+        bundle: null,
+        summary: message
+      });
+    } finally {
+      preflightInFlightRef.current = false;
+    }
+  };
+
   const handlePlay = async (): Promise<void> => {
     if (playRequestInFlightRef.current) {
       return;
@@ -704,6 +1011,20 @@ export function Player({
             {lookupState.kind === "checking" ? "Validating..." : "Validate"}
           </button>
         ) : null}
+        {isEncryptedPreflightEnabled ? (
+          <button
+            type="button"
+            className="h-11 rounded-lg border border-amber-400/60 px-5 text-sm font-medium text-amber-100 transition hover:border-amber-300 disabled:cursor-not-allowed disabled:opacity-60"
+            onClick={() => {
+              void handleEncryptedPlaybackPreflight();
+            }}
+            disabled={encryptedPreflightState.status === "running"}
+          >
+            {encryptedPreflightState.status === "running"
+              ? "Running preflight..."
+              : "Run playback preflight"}
+          </button>
+        ) : null}
         <button
           type="button"
           className="h-11 rounded-lg border border-slate-600 px-5 text-sm font-medium text-slate-100 transition hover:border-cyan-300"
@@ -786,6 +1107,68 @@ export function Player({
             : null}
           {lookupState.kind === "error" ? `error (${lookupState.message})` : null}
         </p>
+      ) : null}
+
+      {isEncryptedPreflightEnabled ? (
+        <section className="space-y-3 rounded-lg border border-slate-800 bg-slate-900/40 p-3 text-sm text-slate-200">
+          <div className="flex items-center justify-between gap-3">
+            <p className="font-medium">Encrypted playback self-check</p>
+            <span className="rounded-full bg-slate-800 px-2 py-0.5 text-xs uppercase">
+              {encryptedPreflightState.status}
+            </span>
+          </div>
+          <p className="text-slate-300">{encryptedPreflightState.summary ?? "not run"}</p>
+          <div className="grid gap-2 md:grid-cols-2">
+            {encryptedPreflightState.steps.map((step) => (
+              <div key={step.id} className="rounded border border-slate-700 p-2">
+                <p>
+                  {step.label}: <span className="uppercase">{step.status}</span>
+                </p>
+                <p className="text-xs text-slate-400">{step.message ?? "-"}</p>
+              </div>
+            ))}
+          </div>
+          {encryptedPreflightState.bundle ? (
+            <div className="space-y-2">
+              <p className="font-medium">Provider checks</p>
+              <ul className="space-y-2">
+                {encryptedPreflightState.bundle.providers.map((provider) => (
+                  <li
+                    key={`${provider.providerId}-${provider.baseUrl}`}
+                    className="rounded border border-slate-700 p-2"
+                  >
+                    <p>
+                      {provider.providerId} | {provider.baseUrl}
+                    </p>
+                    <p className="text-xs text-slate-400">
+                      playlist={provider.playlistStatus} key={provider.keyStatus} segment=
+                      {provider.segmentStatus}
+                    </p>
+                    <p className="text-xs text-slate-400">playlist_url={provider.playlistUrl}</p>
+                    <p className="text-xs text-slate-400">key_uri={provider.keyUri ?? "-"}</p>
+                    <p className="text-xs text-slate-400">segment_url={provider.segmentUrl ?? "-"}</p>
+                    <p className="text-xs text-slate-400">
+                      playlist_msg={provider.playlistMessage ?? "-"}
+                    </p>
+                    <p className="text-xs text-slate-400">key_msg={provider.keyMessage ?? "-"}</p>
+                    <p className="text-xs text-slate-400">
+                      segment_msg={provider.segmentMessage ?? "-"}
+                    </p>
+                  </li>
+                ))}
+              </ul>
+              <button
+                type="button"
+                className="rounded-md border border-slate-600 px-3 py-1 text-xs transition hover:border-cyan-300"
+                onClick={() => {
+                  void copyEncryptedPreflightJson();
+                }}
+              >
+                {preflightCopied ? "Copied" : "Copy preflight JSON"}
+              </button>
+            </div>
+          ) : null}
+        </section>
       ) : null}
 
       {showRecentList ? (

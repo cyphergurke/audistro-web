@@ -34,15 +34,10 @@ describe("devAdmin helpers", () => {
     );
   });
 
-  it("requires both dev flag and development mode", () => {
+  it("requires the explicit dev-admin flag", () => {
     vi.stubEnv("NEXT_PUBLIC_DEV_ADMIN", "true");
-    vi.stubEnv("NODE_ENV", "development");
     expect(isDevAdminEnabled()).toBe(true);
 
-    vi.stubEnv("NODE_ENV", "production");
-    expect(isDevAdminEnabled()).toBe(false);
-
-    vi.stubEnv("NODE_ENV", "development");
     vi.stubEnv("NEXT_PUBLIC_DEV_ADMIN", "false");
     expect(isDevAdminEnabled()).toBe(false);
   });

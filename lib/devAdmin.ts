@@ -7,7 +7,7 @@ const defaultAllowedLNBitsBaseUrls = [
 ];
 
 export function isDevAdminEnabled(): boolean {
-  return process.env.NODE_ENV === "development" && process.env.NEXT_PUBLIC_DEV_ADMIN === "true";
+  return process.env.NEXT_PUBLIC_DEV_ADMIN === "true";
 }
 
 export function assertDevAdminEnabled(): void {
