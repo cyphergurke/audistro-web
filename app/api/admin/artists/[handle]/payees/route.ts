@@ -1,6 +1,6 @@
 import type { CatalogArtistPayeesResponse, CatalogPayee } from "@/lib/adminTypes";
-import { assertDevAdminEnabled, fetchTextWithTimeout, parseAdminID } from "@/lib/devAdmin";
-import { getServerEnv } from "@/lib/env";
+import { fetchCatalogGET } from "@/lib/catalogServer";
+import { assertDevAdminEnabled, parseAdminID } from "@/lib/devAdmin";
 
 export const dynamic = "force-dynamic";
 
@@ -18,9 +18,7 @@ export async function GET(
     assertDevAdminEnabled();
     const { handle } = await context.params;
     const artistHandle = parseAdminID("handle", handle);
-    const { catalogBaseUrl } = getServerEnv();
-    const upstreamUrl = new URL(`/v1/artists/${artistHandle}/payees`, catalogBaseUrl).toString();
-    const upstream = await fetchTextWithTimeout(upstreamUrl, adminTimeoutMs, { method: "GET" });
+    const upstream = await fetchCatalogGET(`/v1/artists/${artistHandle}/payees`, adminTimeoutMs);
 
     if (upstream.status !== 200) {
       return Response.json(

@@ -1,5 +1,6 @@
 export type ServerEnv = {
   catalogBaseUrl: string;
+  catalogBaseUrls: string[];
   fapBaseUrl: string;
   catalogInternalBaseUrl: string;
   fapInternalBaseUrl: string;
@@ -21,16 +22,29 @@ function parseUrl(name: string, value: string): string {
   }
 }
 
+function parseURLList(name: string, value: string): string[] {
+  const parts = value
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (parts.length === 0) {
+    throw new Error(`${name} must contain at least one URL`);
+  }
+  return parts.map((part, index) => parseUrl(`${name}[${index}]`, part));
+}
+
 export function getServerEnv(): ServerEnv {
   if (cachedEnv) {
     return cachedEnv;
   }
 
   const rawCatalog =
+    process.env.CATALOG_BASE_URLS ??
     process.env.CATALOG_BASE_URL ??
     process.env.NEXT_PUBLIC_CATALOG_BASE_URL ??
     "http://localhost:18080";
-  const rawCatalogInternal = process.env.CATALOG_INTERNAL_BASE_URL ?? rawCatalog;
+  const catalogBaseUrls = parseURLList("CATALOG_BASE_URLS", rawCatalog);
+  const rawCatalogInternal = process.env.CATALOG_INTERNAL_BASE_URL ?? catalogBaseUrls[0];
   const rawFap =
     process.env.FAP_BASE_URL ?? process.env.NEXT_PUBLIC_FAP_BASE_URL ?? "http://localhost:18081";
   const rawFapInternal = process.env.FAP_INTERNAL_BASE_URL ?? rawFap;
@@ -40,7 +54,8 @@ export function getServerEnv(): ServerEnv {
     "http://localhost:18082";
 
   cachedEnv = {
-    catalogBaseUrl: parseUrl("CATALOG_BASE_URL", rawCatalog),
+    catalogBaseUrl: catalogBaseUrls[0],
+    catalogBaseUrls,
     fapBaseUrl: parseUrl("FAP_BASE_URL", rawFap),
     catalogInternalBaseUrl: parseUrl("CATALOG_INTERNAL_BASE_URL", rawCatalogInternal),
     fapInternalBaseUrl: parseUrl("FAP_INTERNAL_BASE_URL", rawFapInternal),

@@ -207,17 +207,12 @@ export async function fetchTextWithTimeout(
   }
 }
 
-export async function fetchBoostContextFromCatalog(
-  catalogBaseUrl: string,
-  assetId: string
-): Promise<BoostContext> {
-  const playbackUrl = new URL(`/v1/playback/${encodeURIComponent(assetId)}`, catalogBaseUrl);
-  const result = await fetchTextWithTimeout(playbackUrl.toString(), boostRequestTimeoutMs, {
-    method: "GET"
-  });
+export async function fetchBoostContextFromCatalog(assetId: string): Promise<BoostContext> {
+  const result = await fetchCatalogGET(`/v1/playback/${encodeURIComponent(assetId)}`, boostRequestTimeoutMs);
   if (result.status !== 200) {
     throw new Error(result.text || `failed to fetch playback (${result.status})`);
   }
   const playback = parsePlaybackResponse(result.text);
   return extractBoostContextFromPlayback(assetId, playback);
 }
+import { fetchCatalogGET } from "@/lib/catalogServer";

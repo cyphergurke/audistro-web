@@ -1,6 +1,6 @@
 import type { CatalogArtist, CatalogBrowseArtistsResponse } from "@/lib/adminTypes";
-import { assertDevAdminEnabled, fetchTextWithTimeout } from "@/lib/devAdmin";
-import { getServerEnv } from "@/lib/env";
+import { fetchCatalogGET } from "@/lib/catalogServer";
+import { assertDevAdminEnabled } from "@/lib/devAdmin";
 
 export const dynamic = "force-dynamic";
 
@@ -17,9 +17,7 @@ function sortArtists(artists: CatalogArtist[]): CatalogArtist[] {
 export async function GET(): Promise<Response> {
   try {
     assertDevAdminEnabled();
-    const { catalogBaseUrl } = getServerEnv();
-    const upstreamUrl = new URL("/v1/browse/artists", catalogBaseUrl).toString();
-    const upstream = await fetchTextWithTimeout(upstreamUrl, adminTimeoutMs, { method: "GET" });
+    const upstream = await fetchCatalogGET("/v1/browse/artists", adminTimeoutMs);
 
     if (upstream.status !== 200) {
       return Response.json(

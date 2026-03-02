@@ -1,3 +1,4 @@
+import { fetchCatalogGET } from "@/lib/catalogServer";
 import { getServerEnv } from "@/lib/env";
 import {
   aggregatePaidEntries,
@@ -13,7 +14,6 @@ import {
 import type { AssetLabel } from "@/lib/ledger";
 import type { LedgerEntry, SpendSummaryResponse } from "@/lib/types";
 import { APIClientError, createAPIClient } from "@/src/lib/apiClient";
-import type { paths as CatalogPaths } from "@/src/gen/catalog";
 import type { paths as FAPPaths } from "@/src/gen/fap";
 import { NextResponse } from "next/server";
 
@@ -71,25 +71,21 @@ function topAssetIDsByAmount(items: Map<string, number>): string[] {
     .map(([assetID]) => assetID);
 }
 
-async function loadAssetLabels(
-  catalogBaseURL: string,
-  assetIDs: string[]
-): Promise<Map<string, AssetLabel>> {
-  const catalogClient = createAPIClient<CatalogPaths>(catalogBaseURL);
+async function loadAssetLabels(assetIDs: string[]): Promise<Map<string, AssetLabel>> {
   const labels = new Map<string, AssetLabel>();
   await Promise.all(
     assetIDs.map(async (assetID) => {
       try {
-        const upstream = await catalogClient.requestJSON<"get", "/v1/assets/{assetId}", CatalogAssetLookupResponse>({
-          method: "get",
-          path: "/v1/assets/{assetId}",
-          pathParams: { assetId: assetID }
-        });
+        const upstream = await fetchCatalogGET(`/v1/assets/${encodeURIComponent(assetID)}`);
+        if (upstream.status !== 200) {
+          return;
+        }
+        const parsed = JSON.parse(upstream.text) as CatalogAssetLookupResponse;
         labels.set(assetID, {
           asset_id: assetID,
-          title: upstream.data.asset?.title,
-          artist_handle: upstream.data.artist?.handle,
-          artist_display_name: upstream.data.artist?.display_name
+          title: parsed.asset?.title,
+          artist_handle: parsed.artist?.handle,
+          artist_display_name: parsed.artist?.display_name
         });
       } catch {
         return;
@@ -147,7 +143,7 @@ export async function GET(req: Request): Promise<Response> {
       });
     }
 
-    const { catalogBaseUrl, fapBaseUrl } = getServerEnv();
+    const { fapBaseUrl } = getServerEnv();
     const fapClient = createAPIClient<FAPPaths>(fapBaseUrl);
     const collectedItems: LedgerEntry[] = [];
     let cursor: string | null = null;
@@ -202,7 +198,7 @@ export async function GET(req: Request): Promise<Response> {
 
     const aggregation = aggregatePaidEntries(collectedItems);
     const topAssetIDs = topAssetIDsByAmount(aggregation.byAssetID);
-    const assetLabels = await loadAssetLabels(catalogBaseUrl, topAssetIDs);
+    const assetLabels = await loadAssetLabels(topAssetIDs);
     const payeeArtistLabels = derivePayeeArtistLabels(collectedItems, assetLabels);
 
     const payload: SpendSummaryResponse = {

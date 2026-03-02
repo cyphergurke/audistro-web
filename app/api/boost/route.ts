@@ -27,8 +27,8 @@ export async function POST(req: Request): Promise<Response> {
     const amountSats = parseAmountSats(body.amountSats);
     const memo = parseMemo(body.memo);
     const idempotencyKey = parseIdempotencyKey(body.idempotencyKey) ?? randomUUID();
-    const { catalogBaseUrl, fapBaseUrl } = getServerEnv();
-    const boostContext = await fetchBoostContextFromCatalog(catalogBaseUrl, assetId);
+    const { fapBaseUrl } = getServerEnv();
+    const boostContext = await fetchBoostContextFromCatalog(assetId);
     const reachableFapUrl = resolveReachableFapUrl(boostContext.fapUrl, fapBaseUrl);
 
     const boostUrl = new URL("/v1/boost", reachableFapUrl).toString();

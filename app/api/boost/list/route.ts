@@ -26,8 +26,8 @@ export async function GET(req: Request): Promise<Response> {
     const cursor = parseBoostListCursor(requestUrl.searchParams.get("cursor"));
     const status = parseBoostListStatus(requestUrl.searchParams.get("status"));
 
-    const { catalogBaseUrl, fapBaseUrl } = getServerEnv();
-    const boostContext = await fetchBoostContextFromCatalog(catalogBaseUrl, assetId);
+    const { fapBaseUrl } = getServerEnv();
+    const boostContext = await fetchBoostContextFromCatalog(assetId);
     const reachableFapUrl = resolveReachableFapUrl(boostContext.fapUrl, fapBaseUrl);
 
     const upstreamUrl = new URL("/v1/boost", reachableFapUrl);

@@ -1,3 +1,4 @@
+import { fetchCatalogGET } from "@/lib/catalogServer";
 import { getServerEnv } from "@/lib/env";
 import { rewriteKeyUri } from "@/lib/hlsRewrite";
 import type { PlaybackResponse, ProviderHint } from "@/lib/types";
@@ -110,11 +111,9 @@ async function fetchText(
 }
 
 async function fetchPlaybackFromCatalog(
-  catalogBaseUrl: string,
   assetId: string
 ): Promise<PlaybackResponse> {
-  const playbackUrl = new URL(`/v1/playback/${encodeURIComponent(assetId)}`, catalogBaseUrl);
-  const result = await fetchText(playbackUrl, playlistTimeoutMs);
+  const result = await fetchCatalogGET(`/v1/playback/${encodeURIComponent(assetId)}`, playlistTimeoutMs);
   if (result.status !== 200) {
     throw {
       message: result.text || "failed to fetch playback from catalog",
@@ -195,7 +194,7 @@ async function fetchTrustedPlaylist(
 
 export async function GET(req: Request, { params }: RouteContext): Promise<Response> {
   try {
-    const { catalogBaseUrl, providerInternalBaseUrl } = getServerEnv();
+    const { providerInternalBaseUrl } = getServerEnv();
     const { assetId: rawAssetId } = await params;
     const assetId = parseId("assetId", rawAssetId);
 
@@ -216,7 +215,7 @@ export async function GET(req: Request, { params }: RouteContext): Promise<Respo
     }
     const token = parseToken(tokenRaw);
 
-    const playback = await fetchPlaybackFromCatalog(catalogBaseUrl, assetId);
+    const playback = await fetchPlaybackFromCatalog(assetId);
     const provider = resolveTrustedProvider(playback, providerId);
     if (!provider) {
       return Response.json(

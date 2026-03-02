@@ -27,8 +27,8 @@ export async function GET(req: Request, { params }: RouteContext): Promise<Respo
       throw new Error("query string is too long");
     }
     const assetId = parseAssetId(requestUrl.searchParams.get("assetId") ?? "");
-    const { catalogBaseUrl, fapBaseUrl } = getServerEnv();
-    const boostContext = await fetchBoostContextFromCatalog(catalogBaseUrl, assetId);
+    const { fapBaseUrl } = getServerEnv();
+    const boostContext = await fetchBoostContextFromCatalog(assetId);
     const reachableFapUrl = resolveReachableFapUrl(boostContext.fapUrl, fapBaseUrl);
 
     const upstreamUrl = new URL(`/v1/boost/${encodeURIComponent(boostId)}`, reachableFapUrl);

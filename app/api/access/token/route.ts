@@ -2,8 +2,8 @@ import {
   APIClientError,
   createAPIClient
 } from "@/src/lib/apiClient";
-import type { paths as CatalogPaths } from "@/src/gen/catalog";
 import type { paths as FAPPaths } from "@/src/gen/fap";
+import { fetchCatalogGET } from "@/lib/catalogServer";
 import {
   classifyTokenExchangeConflict,
   extractAccessFapURL,
@@ -30,33 +30,23 @@ export async function POST(req: Request): Promise<Response> {
     const body = (await req.json()) as ExchangeTokenBody;
     const assetId = parseAssetId(String(body.assetId ?? ""));
     const challengeId = parseChallengeId(String(body.challengeId ?? ""));
-    const { catalogBaseUrl, fapBaseUrl } = getServerEnv();
+    const { fapBaseUrl } = getServerEnv();
     const inboundCookie = req.headers.get("cookie") ?? "";
-    const catalogClient = createAPIClient<CatalogPaths>(catalogBaseUrl);
 
     let playback: PlaybackResponse;
     try {
-      const playbackResult = await catalogClient.requestJSON<"get", "/v1/playback/{assetId}", PlaybackResponse>({
-        method: "get",
-        path: "/v1/playback/{assetId}",
-        pathParams: { assetId },
-        timeoutMs: boostRequestTimeoutMs
-      });
-      playback = playbackResult.data;
-    } catch (error: unknown) {
-      if (error instanceof APIClientError) {
-        const response = new Response(error.bodyText, {
-          status: error.status,
+      const playbackResult = await fetchCatalogGET(`/v1/playback/${encodeURIComponent(assetId)}`, boostRequestTimeoutMs);
+      if (playbackResult.status !== 200) {
+        return new Response(playbackResult.text, {
+          status: playbackResult.status,
           headers: {
-            "Content-Type": error.contentType || "application/json",
+            "Content-Type": playbackResult.contentType || "application/json",
             "Cache-Control": "no-store"
           }
         });
-        if (error.setCookie) {
-          response.headers.set("set-cookie", error.setCookie);
-        }
-        return response;
       }
+      playback = JSON.parse(playbackResult.text) as PlaybackResponse;
+    } catch (error: unknown) {
       throw error;
     }
 

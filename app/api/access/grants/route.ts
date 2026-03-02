@@ -1,4 +1,5 @@
 import { extractAccessFapURL } from "@/lib/accessServer";
+import { fetchCatalogGET } from "@/lib/catalogServer";
 import {
   boostRequestTimeoutMs,
   parseAssetId,
@@ -67,30 +68,20 @@ export async function GET(req: Request): Promise<Response> {
     const requestURL = new URL(req.url);
     const assetId = parseAssetId(requestURL.searchParams.get("assetId") ?? "");
     const inboundCookie = req.headers.get("cookie") ?? "";
-    const { catalogBaseUrl, fapBaseUrl } = getServerEnv();
+    const { fapBaseUrl } = getServerEnv();
 
-    const playbackURL = new URL(`/v1/playback/${encodeURIComponent(assetId)}`, catalogBaseUrl).toString();
-    const playbackController = new AbortController();
-    const playbackTimeout = setTimeout(() => playbackController.abort(), boostRequestTimeoutMs);
-    const playbackUpstream = await fetch(playbackURL, {
-      method: "GET",
-      cache: "no-store",
-      signal: playbackController.signal
-    });
-    clearTimeout(playbackTimeout);
-    const playbackText = await playbackUpstream.text();
-    const playbackContentType = playbackUpstream.headers.get("content-type") ?? "application/json";
+    const playbackUpstream = await fetchCatalogGET(`/v1/playback/${encodeURIComponent(assetId)}`, boostRequestTimeoutMs);
     if (playbackUpstream.status !== 200) {
-      return new Response(playbackText, {
+      return new Response(playbackUpstream.text, {
         status: playbackUpstream.status,
         headers: {
-          "Content-Type": playbackContentType,
+          "Content-Type": playbackUpstream.contentType,
           "Cache-Control": "no-store"
         }
       });
     }
 
-    const playback = parsePlaybackResponse(playbackText);
+    const playback = parsePlaybackResponse(playbackUpstream.text);
     const catalogFapURL = extractAccessFapURL(assetId, playback);
     const reachableFapBaseURL = resolveReachableFapUrl(catalogFapURL, fapBaseUrl);
     const grantsURL = new URL("/v1/access/grants", reachableFapBaseURL);

@@ -2,7 +2,7 @@ import {
   APIClientError,
   createAPIClient
 } from "@/src/lib/apiClient";
-import type { paths as CatalogPaths } from "@/src/gen/catalog";
+import { fetchCatalogGET } from "@/lib/catalogServer";
 import type { components as FAPComponents, paths as FAPPaths } from "@/src/gen/fap";
 import {
   extractAccessFapURL,
@@ -102,23 +102,22 @@ export async function POST(req: Request, { params }: RouteContext): Promise<Resp
   try {
     const { assetId: rawAssetId } = await params;
     const assetId = parseAssetId(rawAssetId);
-    const { catalogBaseUrl, fapBaseUrl } = getServerEnv();
+    const { fapBaseUrl } = getServerEnv();
     const inboundCookie = req.headers.get("cookie") ?? "";
-    const catalogClient = createAPIClient<CatalogPaths>(catalogBaseUrl);
-
     let playback: PlaybackResponse;
     try {
-      const playbackResult = await catalogClient.requestJSON<"get", "/v1/playback/{assetId}", PlaybackResponse>({
-        method: "get",
-        path: "/v1/playback/{assetId}",
-        pathParams: { assetId },
-        timeoutMs: boostRequestTimeoutMs
-      });
-      playback = playbackResult.data;
-    } catch (error: unknown) {
-      if (error instanceof APIClientError) {
-        return proxyAPIError(error);
+      const playbackResult = await fetchCatalogGET(`/v1/playback/${encodeURIComponent(assetId)}`, boostRequestTimeoutMs);
+      if (playbackResult.status !== 200) {
+        return new Response(playbackResult.text, {
+          status: playbackResult.status,
+          headers: {
+            "Content-Type": playbackResult.contentType || "application/json",
+            "Cache-Control": "no-store"
+          }
+        });
       }
+      playback = JSON.parse(playbackResult.text) as PlaybackResponse;
+    } catch (error: unknown) {
       throw error;
     }
     const catalogFapURL = extractAccessFapURL(assetId, playback);

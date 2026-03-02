@@ -4,6 +4,7 @@ import type {
   CatalogPayeeResponse,
   FAPPayeeCreateResponse
 } from "@/lib/adminTypes";
+import { fetchCatalogGET } from "@/lib/catalogServer";
 import {
   assertDevAdminEnabled,
   fetchTextWithTimeout,
@@ -100,11 +101,7 @@ export async function POST(req: Request): Promise<Response> {
         : fallbackFAPPublicBaseURL
     );
 
-    const artistsLookup = await fetchTextWithTimeout(
-      new URL("/v1/browse/artists", catalogBaseUrl).toString(),
-      adminTimeoutMs,
-      { method: "GET" }
-    );
+    const artistsLookup = await fetchCatalogGET("/v1/browse/artists", adminTimeoutMs);
     if (artistsLookup.status !== 200) {
       return Response.json(
         { error: artistsLookup.text || "failed to load artists from catalog" },
