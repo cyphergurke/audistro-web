@@ -1,39 +1,37 @@
 # syntax=docker/dockerfile:1.7
 
-FROM node:24-bookworm-slim AS base
+FROM node:20-bookworm-slim AS base
 ENV PNPM_HOME=/pnpm
 ENV PNPM_STORE_DIR=/pnpm/store
 ENV PATH=${PNPM_HOME}:${PATH}
-ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 WORKDIR /app
-RUN corepack enable
+RUN npm install -g pnpm@10.30.3
 
 FROM base AS deps
 COPY package.json pnpm-lock.yaml ./
-RUN --mount=type=cache,target=/pnpm/store \
-    sh -lc 'for attempt in 1 2 3 4 5; do pnpm fetch --frozen-lockfile && exit 0; sleep $((attempt * 2)); done; exit 1'
+RUN --mount=type=cache,id=audistro-web-pnpm-store,target=/pnpm/store \
+    pnpm install --frozen-lockfile
 
 FROM base AS builder
-COPY --from=deps /pnpm/store /pnpm/store
-COPY package.json pnpm-lock.yaml ./
-RUN --mount=type=cache,target=/pnpm/store \
-    pnpm install --frozen-lockfile --offline
+COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN pnpm build
 
-FROM base AS runner
+FROM node:20-bookworm-slim AS runner
 ENV NODE_ENV=production
 ENV PORT=3000
 ENV HOSTNAME=0.0.0.0
-COPY --from=deps /pnpm/store /pnpm/store
-COPY --from=builder /app/package.json ./package.json
-COPY --from=builder /app/pnpm-lock.yaml ./pnpm-lock.yaml
-RUN --mount=type=cache,target=/pnpm/store \
-    pnpm install --prod --frozen-lockfile --offline
+WORKDIR /app
 
-COPY --from=builder /app/.next ./.next
-COPY --from=builder /app/public ./public
-COPY --from=builder /app/next.config.js ./next.config.js
+RUN groupadd --system --gid 1001 nodejs \
+    && useradd --system --uid 1001 --gid 1001 nextjs
 
+COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone /app
+COPY --from=builder --chown=nextjs:nodejs /app/.next/static /app/services/audistro-web/.next/static
+COPY --from=builder --chown=nextjs:nodejs /app/public /app/services/audistro-web/public
+
+USER nextjs
+WORKDIR /app/services/audistro-web
 EXPOSE 3000
-CMD ["pnpm", "run", "start"]
+
+CMD ["node", "server.js"]
