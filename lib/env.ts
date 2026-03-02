@@ -1,3 +1,5 @@
+import { assertServerRuntimeEnv } from "@/src/server/env";
+
 export type ServerEnv = {
   catalogBaseUrl: string;
   catalogBaseUrls: string[];
@@ -34,6 +36,8 @@ function parseURLList(name: string, value: string): string[] {
 }
 
 export function getServerEnv(): ServerEnv {
+  assertServerRuntimeEnv();
+
   if (cachedEnv) {
     return cachedEnv;
   }
