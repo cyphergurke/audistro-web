@@ -1,14 +1,18 @@
 import {
+  APIClientError,
+  createAPIClient
+} from "@/src/lib/apiClient";
+import type { paths as CatalogPaths } from "@/src/gen/catalog";
+import type { components as FAPComponents, paths as FAPPaths } from "@/src/gen/fap";
+import {
   extractAccessFapURL,
   isPayeeNotFoundResponse,
-  shouldFallbackToChallengeFlow,
-  parseChallengeStartResponse,
-  parseDevAccessResponse
+  shouldFallbackToChallengeFlow
 } from "@/lib/accessServer";
+import type { PlaybackResponse } from "@/lib/types";
 import {
   boostRequestTimeoutMs,
   parseAssetId,
-  parsePlaybackResponse,
   resolveReachableFapUrl
 } from "@/lib/boostServer";
 import { getServerEnv } from "@/lib/env";
@@ -40,42 +44,58 @@ type RouteContext = {
 };
 
 type ChallengeAttemptResult = {
-  status: number;
-  text: string;
-  contentType: string;
+  data?: FAPComponents["schemas"]["ChallengeResponse"];
+  error?: APIClientError;
   setCookie: string | null;
 };
 
 async function requestChallenge(args: {
-  challengeURL: string;
+  fapBaseURL: string;
   inboundCookie: string;
   assetId: string;
   payeeId: string;
   amountMsat: number;
 }): Promise<ChallengeAttemptResult> {
-  const challengeController = new AbortController();
-  const challengeTimeout = setTimeout(() => challengeController.abort(), boostRequestTimeoutMs);
-  const challengeUpstream = await fetch(args.challengeURL, {
-    method: "POST",
-    cache: "no-store",
-    signal: challengeController.signal,
+  const fapClient = createAPIClient<FAPPaths>(args.fapBaseURL);
+  try {
+    const result = await fapClient.requestJSON({
+      method: "post",
+      path: "/v1/fap/challenge",
+      cookie: args.inboundCookie,
+      timeoutMs: boostRequestTimeoutMs,
+      json: {
+        asset_id: args.assetId,
+        payee_id: args.payeeId,
+        amount_msat: args.amountMsat
+      }
+    });
+    return {
+      data: result.data,
+      setCookie: result.setCookie
+    };
+  } catch (error: unknown) {
+    if (error instanceof APIClientError) {
+      return {
+        error,
+        setCookie: error.setCookie
+      };
+    }
+    throw error;
+  }
+}
+
+function proxyAPIError(error: APIClientError): Response {
+  const response = new Response(error.bodyText, {
+    status: error.status,
     headers: {
-      "Content-Type": "application/json",
-      cookie: args.inboundCookie
-    },
-    body: JSON.stringify({
-      asset_id: args.assetId,
-      payee_id: args.payeeId,
-      amount_msat: args.amountMsat
-    })
+      "Content-Type": error.contentType || "application/json",
+      "Cache-Control": "no-store"
+    }
   });
-  clearTimeout(challengeTimeout);
-  return {
-    status: challengeUpstream.status,
-    text: await challengeUpstream.text(),
-    contentType: challengeUpstream.headers.get("content-type") ?? "application/json",
-    setCookie: challengeUpstream.headers.get("set-cookie")
-  };
+  if (error.setCookie) {
+    response.headers.set("set-cookie", error.setCookie);
+  }
+  return response;
 }
 
 export async function POST(req: Request, { params }: RouteContext): Promise<Response> {
@@ -84,75 +104,60 @@ export async function POST(req: Request, { params }: RouteContext): Promise<Resp
     const assetId = parseAssetId(rawAssetId);
     const { catalogBaseUrl, fapBaseUrl } = getServerEnv();
     const inboundCookie = req.headers.get("cookie") ?? "";
+    const catalogClient = createAPIClient<CatalogPaths>(catalogBaseUrl);
 
-    const playbackURL = new URL(`/v1/playback/${encodeURIComponent(assetId)}`, catalogBaseUrl).toString();
-    const playbackController = new AbortController();
-    const playbackTimeout = setTimeout(() => playbackController.abort(), boostRequestTimeoutMs);
-    const playbackUpstream = await fetch(playbackURL, {
-      method: "GET",
-      cache: "no-store",
-      signal: playbackController.signal
-    });
-    clearTimeout(playbackTimeout);
-    const playbackText = await playbackUpstream.text();
-    const playbackContentType = playbackUpstream.headers.get("content-type") ?? "application/json";
-    if (playbackUpstream.status !== 200) {
-      return new Response(playbackText, {
-        status: playbackUpstream.status,
-        headers: {
-          "Content-Type": playbackContentType,
-          "Cache-Control": "no-store"
-        }
+    let playback: PlaybackResponse;
+    try {
+      const playbackResult = await catalogClient.requestJSON<"get", "/v1/playback/{assetId}", PlaybackResponse>({
+        method: "get",
+        path: "/v1/playback/{assetId}",
+        pathParams: { assetId },
+        timeoutMs: boostRequestTimeoutMs
       });
+      playback = playbackResult.data;
+    } catch (error: unknown) {
+      if (error instanceof APIClientError) {
+        return proxyAPIError(error);
+      }
+      throw error;
     }
-
-    const playback = parsePlaybackResponse(playbackText);
     const catalogFapURL = extractAccessFapURL(assetId, playback);
     const reachableFapBaseURL = resolveReachableFapUrl(catalogFapURL, fapBaseUrl);
+    const fapClient = createAPIClient<FAPPaths>(reachableFapBaseURL);
 
-    const devAccessURL = new URL(`/v1/access/${encodeURIComponent(assetId)}`, reachableFapBaseURL).toString();
-    const devController = new AbortController();
-    const devTimeout = setTimeout(() => devController.abort(), boostRequestTimeoutMs);
-    const devAccessUpstream = await fetch(devAccessURL, {
-      method: "POST",
-      cache: "no-store",
-      signal: devController.signal,
-      headers: {
-        cookie: inboundCookie
-      }
-    });
-    clearTimeout(devTimeout);
-    const devText = await devAccessUpstream.text();
-    const devContentType = devAccessUpstream.headers.get("content-type") ?? "application/json";
-    const devSetCookie = devAccessUpstream.headers.get("set-cookie");
-    if (devAccessUpstream.status === 200) {
-      const parsedDev = parseDevAccessResponse(devText);
+    try {
+      const devResult = await fapClient.requestJSON({
+        method: "post",
+        path: "/v1/access/{assetId}",
+        pathParams: { assetId },
+        cookie: inboundCookie,
+        timeoutMs: boostRequestTimeoutMs
+      });
+      const parsedDev = {
+        mode: "dev" as const,
+        asset_id: devResult.data.asset_id,
+        access_token: devResult.data.access_token,
+        expires_at: devResult.data.expires_at
+      };
       const response = NextResponse.json(parsedDev, {
         status: 200,
         headers: {
           "Cache-Control": "no-store"
         }
       });
-      if (devSetCookie) {
-        response.headers.set("set-cookie", devSetCookie);
+      if (devResult.setCookie) {
+        response.headers.set("set-cookie", devResult.setCookie);
       }
       return response;
-    }
-    if (!shouldFallbackToChallengeFlow(devAccessUpstream.status, devText)) {
-      const response = new Response(devText, {
-        status: devAccessUpstream.status,
-        headers: {
-          "Content-Type": devContentType,
-          "Cache-Control": "no-store"
-        }
-      });
-      if (devSetCookie) {
-        response.headers.set("set-cookie", devSetCookie);
+    } catch (error: unknown) {
+      if (!(error instanceof APIClientError)) {
+        throw error;
       }
-      return response;
+      if (!shouldFallbackToChallengeFlow(error.status, error.bodyText)) {
+        return proxyAPIError(error);
+      }
     }
 
-    const challengeURL = new URL("/v1/fap/challenge", reachableFapBaseURL).toString();
     const amountMsat = resolveAccessAmountMsat(playback.asset.pay?.price_msat);
     const primaryPayeeId = (playback.asset.pay?.fap_payee_id ?? "").trim();
     const secondaryPayeeId = (playback.asset.pay?.payee_id ?? "").trim();
@@ -161,7 +166,7 @@ export async function POST(req: Request, { params }: RouteContext): Promise<Resp
     }
 
     let challengeAttempt = await requestChallenge({
-      challengeURL,
+      fapBaseURL: reachableFapBaseURL,
       inboundCookie,
       assetId,
       payeeId: primaryPayeeId || secondaryPayeeId,
@@ -172,10 +177,11 @@ export async function POST(req: Request, { params }: RouteContext): Promise<Resp
       primaryPayeeId &&
       secondaryPayeeId &&
       primaryPayeeId !== secondaryPayeeId &&
-      isPayeeNotFoundResponse(challengeAttempt.status, challengeAttempt.text)
+      challengeAttempt.error &&
+      isPayeeNotFoundResponse(challengeAttempt.error.status, challengeAttempt.error.bodyText)
     ) {
       challengeAttempt = await requestChallenge({
-        challengeURL,
+        fapBaseURL: reachableFapBaseURL,
         inboundCookie,
         assetId,
         payeeId: secondaryPayeeId,
@@ -183,21 +189,20 @@ export async function POST(req: Request, { params }: RouteContext): Promise<Resp
       });
     }
 
-    if (challengeAttempt.status !== 200) {
-      const response = new Response(challengeAttempt.text, {
-        status: challengeAttempt.status,
-        headers: {
-          "Content-Type": challengeAttempt.contentType,
-          "Cache-Control": "no-store"
-        }
-      });
-      if (challengeAttempt.setCookie) {
-        response.headers.set("set-cookie", challengeAttempt.setCookie);
+    if (!challengeAttempt.data) {
+      if (!challengeAttempt.error) {
+        throw new Error("challenge request failed");
       }
-      return response;
+      return proxyAPIError(challengeAttempt.error);
     }
 
-    const parsedChallenge = parseChallengeStartResponse(challengeAttempt.text);
+    const parsedChallenge = {
+      mode: "invoice" as const,
+      challenge_id: challengeAttempt.data.challenge_id || challengeAttempt.data.intent_id,
+      bolt11: challengeAttempt.data.bolt11,
+      expires_at: challengeAttempt.data.expires_at,
+      amount_msat: challengeAttempt.data.amount_msat
+    };
     const response = NextResponse.json(parsedChallenge, {
       status: 200,
       headers: {

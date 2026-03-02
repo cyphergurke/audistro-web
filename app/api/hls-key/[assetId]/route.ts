@@ -1,11 +1,17 @@
 import { extractAccessFapURL } from "@/lib/accessServer";
 import {
+  APIClientError,
+  createAPIClient
+} from "@/src/lib/apiClient";
+import type { paths as CatalogPaths } from "@/src/gen/catalog";
+import type { paths as FAPPaths } from "@/src/gen/fap";
+import {
   boostRequestTimeoutMs,
   parseAssetId,
-  parsePlaybackResponse,
   resolveReachableFapUrl
 } from "@/lib/boostServer";
 import { getServerEnv } from "@/lib/env";
+import type { PlaybackResponse } from "@/lib/types";
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
@@ -34,75 +40,74 @@ export async function GET(req: Request, { params }: RouteContext): Promise<Respo
     const token = parseToken(new URL(req.url).searchParams.get("token") ?? "");
     const inboundCookie = req.headers.get("cookie") ?? "";
     const { catalogBaseUrl, fapBaseUrl } = getServerEnv();
-
-    const playbackURL = new URL(`/v1/playback/${encodeURIComponent(assetId)}`, catalogBaseUrl).toString();
-    const playbackController = new AbortController();
-    const playbackTimeout = setTimeout(() => playbackController.abort(), boostRequestTimeoutMs);
-    const playbackUpstream = await fetch(playbackURL, {
-      method: "GET",
-      cache: "no-store",
-      signal: playbackController.signal
-    });
-    clearTimeout(playbackTimeout);
-    const playbackText = await playbackUpstream.text();
-    const playbackContentType = playbackUpstream.headers.get("content-type") ?? "application/json";
-    if (playbackUpstream.status !== 200) {
-      return new Response(playbackText, {
-        status: playbackUpstream.status,
-        headers: {
-          "Content-Type": playbackContentType,
-          "Cache-Control": "no-store"
-        }
+    const catalogClient = createAPIClient<CatalogPaths>(catalogBaseUrl);
+    let playback: PlaybackResponse;
+    try {
+      const playbackResult = await catalogClient.requestJSON<"get", "/v1/playback/{assetId}", PlaybackResponse>({
+        method: "get",
+        path: "/v1/playback/{assetId}",
+        pathParams: { assetId },
+        timeoutMs: boostRequestTimeoutMs
       });
+      playback = playbackResult.data;
+    } catch (error: unknown) {
+      if (error instanceof APIClientError) {
+        const response = new Response(error.bodyText, {
+          status: error.status,
+          headers: {
+            "Content-Type": error.contentType || "application/json",
+            "Cache-Control": "no-store"
+          }
+        });
+        if (error.setCookie) {
+          response.headers.set("set-cookie", error.setCookie);
+        }
+        return response;
+      }
+      throw error;
     }
-
-    const playback = parsePlaybackResponse(playbackText);
     const catalogFapURL = extractAccessFapURL(assetId, playback);
     const reachableFapBaseURL = resolveReachableFapUrl(catalogFapURL, fapBaseUrl);
-    const keyURL = new URL(`/hls/${encodeURIComponent(assetId)}/key`, reachableFapBaseURL).toString();
+    const fapClient = createAPIClient<FAPPaths>(reachableFapBaseURL);
 
-    const keyController = new AbortController();
-    const keyTimeout = setTimeout(() => keyController.abort(), boostRequestTimeoutMs);
-    const keyUpstream = await fetch(keyURL, {
-      method: "GET",
-      cache: "no-store",
-      signal: keyController.signal,
-      headers: {
-        Authorization: `Bearer ${token}`,
-        cookie: inboundCookie
-      }
-    });
-    clearTimeout(keyTimeout);
-    const setCookie = keyUpstream.headers.get("set-cookie");
-    const contentType = keyUpstream.headers.get("content-type") ?? "application/octet-stream";
-
-    if (keyUpstream.status !== 200) {
-      const text = await keyUpstream.text();
-      const response = new Response(text, {
-        status: keyUpstream.status,
+    try {
+      const keyResult = await fapClient.requestBinary({
+        method: "get",
+        path: "/hls/{assetId}/key",
+        pathParams: { assetId },
+        cookie: inboundCookie,
+        timeoutMs: boostRequestTimeoutMs,
         headers: {
-          "Content-Type": contentType,
+          Authorization: `Bearer ${token}`
+        }
+      });
+      const response = new Response(keyResult.data, {
+        status: 200,
+        headers: {
+          "Content-Type": keyResult.response.headers.get("content-type") ?? "application/octet-stream",
           "Cache-Control": "no-store"
         }
       });
-      if (setCookie) {
-        response.headers.set("set-cookie", setCookie);
+      if (keyResult.setCookie) {
+        response.headers.set("set-cookie", keyResult.setCookie);
       }
       return response;
-    }
-
-    const payload = await keyUpstream.arrayBuffer();
-    const response = new Response(payload, {
-      status: 200,
-      headers: {
-        "Content-Type": contentType,
-        "Cache-Control": "no-store"
+    } catch (error: unknown) {
+      if (error instanceof APIClientError) {
+        const response = new Response(error.bodyText, {
+          status: error.status,
+          headers: {
+            "Content-Type": error.contentType || "application/json",
+            "Cache-Control": "no-store"
+          }
+        });
+        if (error.setCookie) {
+          response.headers.set("set-cookie", error.setCookie);
+        }
+        return response;
       }
-    });
-    if (setCookie) {
-      response.headers.set("set-cookie", setCookie);
+      throw error;
     }
-    return response;
   } catch (err: unknown) {
     if (err instanceof Error) {
       return NextResponse.json({ error: err.message }, { status: 400 });
@@ -110,4 +115,3 @@ export async function GET(req: Request, { params }: RouteContext): Promise<Respo
     return NextResponse.json({ error: "hls key proxy failed" }, { status: 500 });
   }
 }
-

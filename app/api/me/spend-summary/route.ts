@@ -3,18 +3,18 @@ import {
   aggregatePaidEntries,
   buildTopAssets,
   buildTopPayees,
-  fetchTextWithTimeout,
   hashCookieForCache,
-  ledgerRequestTimeoutMs,
-  parseAssetLookupLabel,
-  parseErrorMessage,
   parseLedgerListResponse,
+  parseErrorMessage,
   resolveTimeWindow,
   spendSummaryMaxPages,
   spendSummaryTopLimit
 } from "@/lib/ledger";
 import type { AssetLabel } from "@/lib/ledger";
 import type { LedgerEntry, SpendSummaryResponse } from "@/lib/types";
+import { APIClientError, createAPIClient } from "@/src/lib/apiClient";
+import type { paths as CatalogPaths } from "@/src/gen/catalog";
+import type { paths as FAPPaths } from "@/src/gen/fap";
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
@@ -27,6 +27,16 @@ const maxLedgerPageLimit = 100;
 type CachedSummary = {
   expiresAt: number;
   payload: SpendSummaryResponse;
+};
+
+type CatalogAssetLookupResponse = {
+  asset?: {
+    title?: string;
+  };
+  artist?: {
+    handle?: string;
+    display_name?: string;
+  };
 };
 
 const spendSummaryCache = new Map<string, CachedSummary>();
@@ -65,21 +75,24 @@ async function loadAssetLabels(
   catalogBaseURL: string,
   assetIDs: string[]
 ): Promise<Map<string, AssetLabel>> {
+  const catalogClient = createAPIClient<CatalogPaths>(catalogBaseURL);
   const labels = new Map<string, AssetLabel>();
   await Promise.all(
     assetIDs.map(async (assetID) => {
-      const upstreamURL = new URL(`/v1/assets/${encodeURIComponent(assetID)}`, catalogBaseURL);
-      const upstream = await fetchTextWithTimeout(upstreamURL.toString(), ledgerRequestTimeoutMs, {
-        method: "GET"
-      });
-      if (upstream.status !== 200) {
-        return;
-      }
       try {
-        const parsed = parseAssetLookupLabel(upstream.text);
-        labels.set(assetID, parsed);
+        const upstream = await catalogClient.requestJSON<"get", "/v1/assets/{assetId}", CatalogAssetLookupResponse>({
+          method: "get",
+          path: "/v1/assets/{assetId}",
+          pathParams: { assetId: assetID }
+        });
+        labels.set(assetID, {
+          asset_id: assetID,
+          title: upstream.data.asset?.title,
+          artist_handle: upstream.data.artist?.handle,
+          artist_display_name: upstream.data.artist?.display_name
+        });
       } catch {
-        // Ignore unknown asset payloads and keep ID-only fallback.
+        return;
       }
     })
   );
@@ -135,53 +148,56 @@ export async function GET(req: Request): Promise<Response> {
     }
 
     const { catalogBaseUrl, fapBaseUrl } = getServerEnv();
+    const fapClient = createAPIClient<FAPPaths>(fapBaseUrl);
     const collectedItems: LedgerEntry[] = [];
     let cursor: string | null = null;
     let latestSetCookie: string | null = null;
 
     for (let page = 0; page < spendSummaryMaxPages; page += 1) {
-      const upstreamURL = new URL("/v1/ledger", fapBaseUrl);
-      upstreamURL.searchParams.set("status", "paid");
-      upstreamURL.searchParams.set("limit", String(maxLedgerPageLimit));
-      if (cursor) {
-        upstreamURL.searchParams.set("cursor", cursor);
-      }
-
-      const upstream = await fetchTextWithTimeout(upstreamURL.toString(), ledgerRequestTimeoutMs, {
-        method: "GET",
-        headers: {
-          cookie: inboundCookie
+      let parsed: FAPPaths["/v1/ledger"]["get"]["responses"][200]["content"]["application/json"];
+      try {
+        const upstream = await fapClient.requestJSON({
+          method: "get",
+          path: "/v1/ledger",
+          cookie: inboundCookie,
+          query: {
+            status: "paid",
+            limit: maxLedgerPageLimit,
+            cursor: cursor ?? undefined
+          }
+        });
+        parsed = upstream.data;
+        if (upstream.setCookie) {
+          latestSetCookie = upstream.setCookie;
         }
-      });
-      if (upstream.setCookie) {
-        latestSetCookie = upstream.setCookie;
-      }
-      if (upstream.status !== 200) {
-        const message = parseErrorMessage(upstream.text) || "failed to load ledger";
-        const response = NextResponse.json({ error: message }, { status: upstream.status });
-        if (latestSetCookie) {
-          response.headers.set("set-cookie", latestSetCookie);
+      } catch (error: unknown) {
+        if (!(error instanceof APIClientError)) {
+          throw error;
+        }
+        const message = parseErrorMessage(error.bodyText) || "failed to load ledger";
+        const response = NextResponse.json({ error: message }, { status: error.status });
+        if (error.setCookie ?? latestSetCookie) {
+          response.headers.set("set-cookie", error.setCookie ?? latestSetCookie ?? "");
         }
         return response;
       }
-
-      const parsed = parseLedgerListResponse(upstream.text);
-      if (parsed.items.length === 0) {
+      const normalizedResponse = parseLedgerListResponse(JSON.stringify(parsed));
+      if (normalizedResponse.items.length === 0) {
         break;
       }
 
       let oldestCreatedAt = Number.MAX_SAFE_INTEGER;
-      for (const item of parsed.items) {
+      for (const item of normalizedResponse.items) {
         oldestCreatedAt = Math.min(oldestCreatedAt, item.created_at);
         if (item.created_at >= window.from && item.created_at <= window.to) {
           collectedItems.push(item);
         }
       }
 
-      if (!parsed.next_cursor || oldestCreatedAt < window.from) {
+      if (!normalizedResponse.next_cursor || oldestCreatedAt < window.from) {
         break;
       }
-      cursor = parsed.next_cursor;
+      cursor = normalizedResponse.next_cursor;
     }
 
     const aggregation = aggregatePaidEntries(collectedItems);

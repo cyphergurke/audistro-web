@@ -1,15 +1,16 @@
 import { getServerEnv } from "@/lib/env";
 import {
-  fetchTextWithTimeout,
   filterEntriesByWindow,
-  ledgerRequestTimeoutMs,
   parseLedgerCursor,
+  parseLedgerListResponse,
   parseLedgerKind,
   parseLedgerLimit,
-  parseLedgerListResponse,
   parseLedgerStatus,
   parseUnixSeconds
 } from "@/lib/ledger";
+import { APIClientError, createAPIClient } from "@/src/lib/apiClient";
+import type { paths as FAPPaths } from "@/src/gen/fap";
+import type { LedgerEntry } from "@/lib/types";
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
@@ -35,48 +36,53 @@ export async function GET(req: Request): Promise<Response> {
 
     const inboundCookie = req.headers.get("cookie") ?? "";
     const { fapBaseUrl } = getServerEnv();
-    const upstreamURL = new URL("/v1/ledger", fapBaseUrl);
-    upstreamURL.searchParams.set("limit", String(limit));
-    if (kind) {
-      upstreamURL.searchParams.set("kind", kind);
-    }
-    if (status) {
-      upstreamURL.searchParams.set("status", status);
-    }
-    if (cursor) {
-      upstreamURL.searchParams.set("cursor", cursor);
-    }
-
-    const upstream = await fetchTextWithTimeout(upstreamURL.toString(), ledgerRequestTimeoutMs, {
-      method: "GET",
-      headers: {
-        cookie: inboundCookie
-      }
-    });
-
-    if (upstream.status !== 200) {
-      const response = new Response(upstream.text, {
-        status: upstream.status,
-        headers: {
-          "Content-Type": upstream.contentType,
-          "Cache-Control": "no-store"
+    const fapClient = createAPIClient<FAPPaths>(fapBaseUrl);
+    let parsed: FAPPaths["/v1/ledger"]["get"]["responses"][200]["content"]["application/json"];
+    let setCookie: string | null = null;
+    try {
+      const upstream = await fapClient.requestJSON({
+        method: "get",
+        path: "/v1/ledger",
+        cookie: inboundCookie,
+        query: {
+          limit,
+          kind: kind ?? undefined,
+          status: status ?? undefined,
+          cursor: cursor ?? undefined
         }
       });
-      if (upstream.setCookie) {
-        response.headers.set("set-cookie", upstream.setCookie);
+      parsed = upstream.data;
+      setCookie = upstream.setCookie;
+    } catch (error: unknown) {
+      if (error instanceof APIClientError) {
+        const response = new Response(error.bodyText, {
+          status: error.status,
+          headers: {
+            "Content-Type": error.contentType || "application/json",
+            "Cache-Control": "no-store"
+          }
+        });
+        if (error.setCookie) {
+          response.headers.set("set-cookie", error.setCookie);
+        }
+        return response;
       }
-      return response;
+      throw error;
     }
+    const normalizedResponse = parseLedgerListResponse(JSON.stringify(parsed));
+    const normalizedItems: LedgerEntry[] = normalizedResponse.items.map((item) => ({
+      ...item,
+      paid_at: item.paid_at ?? null
+    }));
 
-    const parsed = parseLedgerListResponse(upstream.text);
     const filteredItems =
       from !== null || to !== null
         ? filterEntriesByWindow(
-            parsed.items,
+            normalizedItems,
             from ?? Number.MIN_SAFE_INTEGER,
             to ?? Number.MAX_SAFE_INTEGER
           )
-        : parsed.items;
+        : normalizedItems;
 
     const response = NextResponse.json(
       {
@@ -91,8 +97,8 @@ export async function GET(req: Request): Promise<Response> {
         }
       }
     );
-    if (upstream.setCookie) {
-      response.headers.set("set-cookie", upstream.setCookie);
+    if (setCookie) {
+      response.headers.set("set-cookie", setCookie);
     }
     return response;
   } catch (err: unknown) {

@@ -1,13 +1,18 @@
-import type { AdminBootstrapArtistResponse, FAPPayeeCreateResponse } from "@/lib/adminTypes";
 import {
   assertDevAdminEnabled,
-  fetchTextWithTimeout,
   parseAdminID,
   parseOptionalAdminID,
   parseHTTPURL,
   validateLNBitsBaseUrl
 } from "@/lib/devAdmin";
 import { getServerEnv } from "@/lib/env";
+import type {
+  AdminBootstrapArtistResponse,
+  FAPPayeeCreateResponse
+} from "@/lib/adminTypes";
+import { APIClientError, createAPIClient } from "@/src/lib/apiClient";
+import type { paths as CatalogPaths } from "@/src/gen/catalog";
+import type { paths as FAPPaths } from "@/src/gen/fap";
 
 export const dynamic = "force-dynamic";
 
@@ -52,11 +57,6 @@ function parseOptionalString(value: unknown, maxLength: number): string | null {
   return trimmed;
 }
 
-function parseFAPPayeeID(payloadText: string): string {
-  const parsed = JSON.parse(payloadText) as FAPPayeeCreateResponse;
-  return parseAdminID("fap payee id", parsed.payee_id ?? "");
-}
-
 export async function POST(req: Request): Promise<Response> {
   try {
     assertDevAdminEnabled();
@@ -81,59 +81,69 @@ export async function POST(req: Request): Promise<Response> {
       "fap_public_base_url",
       process.env.NEXT_PUBLIC_FAP_PUBLIC_BASE_URL?.trim() || "http://localhost:18081"
     );
+    const fapClient = createAPIClient<FAPPaths>(fapInternalBaseUrl);
+    const catalogClient = createAPIClient<CatalogPaths>(catalogInternalBaseUrl);
 
-    const fapCreate = await fetchTextWithTimeout(
-      new URL("/v1/payees", fapInternalBaseUrl).toString(),
-      adminTimeoutMs,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+    let createdFAPPayeeID: string;
+    try {
+      const fapCreate = await fapClient.requestJSON<"post", "/v1/payees", FAPPayeeCreateResponse>({
+        method: "post",
+        path: "/v1/payees",
+        timeoutMs: adminTimeoutMs,
+        json: {
           display_name: displayName,
           lnbits_base_url: lnbitsBaseUrl,
           lnbits_invoice_key: lnbitsInvoiceKey,
           lnbits_read_key: lnbitsReadKey
-        })
+        }
+      });
+      createdFAPPayeeID = parseAdminID("fap payee id", fapCreate.data.payee_id ?? "");
+    } catch (error: unknown) {
+      if (error instanceof APIClientError) {
+        return Response.json(
+          { error: error.bodyText || `fap payee create failed (${error.status})` },
+          { status: 502 }
+        );
       }
-    );
-    if (fapCreate.status !== 200) {
-      return Response.json(
-        { error: fapCreate.text || `fap payee create failed (${fapCreate.status})` },
-        { status: 502 }
-      );
+      throw error;
     }
-    const createdFAPPayeeID = parseFAPPayeeID(fapCreate.text);
 
-    const catalogCreate = await fetchTextWithTimeout(
-      new URL("/v1/admin/bootstrap/artist", catalogInternalBaseUrl).toString(),
-      adminTimeoutMs,
-      {
-        method: "POST",
+    let parsed: AdminBootstrapArtistResponse;
+    try {
+      const catalogCreate = await catalogClient.requestJSON<
+        "post",
+        "/v1/admin/bootstrap/artist",
+        AdminBootstrapArtistResponse
+      >({
+        method: "post",
+        path: "/v1/admin/bootstrap/artist",
+        timeoutMs: adminTimeoutMs,
         headers: {
-          "Content-Type": "application/json",
           "X-Admin-Token": catalogAdminToken
         },
-        body: JSON.stringify({
-          artist_id: artistId,
+        json: {
+          artist_id: artistId ?? undefined,
           handle,
           display_name: displayName,
-          pubkey_hex: pubkeyHex,
+          pubkey_hex: pubkeyHex ?? undefined,
           payee: {
-            payee_id: payeeId,
+            payee_id: payeeId ?? undefined,
             fap_public_base_url: fapPublicBaseUrl,
             fap_payee_id: createdFAPPayeeID
           }
-        })
+        }
+      });
+      parsed = catalogCreate.data;
+    } catch (error: unknown) {
+      if (error instanceof APIClientError) {
+        return Response.json(
+          { error: error.bodyText || `catalog bootstrap failed (${error.status})` },
+          { status: error.status === 409 ? 409 : 502 }
+        );
       }
-    );
-    if (catalogCreate.status !== 200) {
-      return Response.json(
-        { error: catalogCreate.text || `catalog bootstrap failed (${catalogCreate.status})` },
-        { status: catalogCreate.status === 409 ? 409 : 502 }
-      );
+      throw error;
     }
 
-    const parsed = JSON.parse(catalogCreate.text) as AdminBootstrapArtistResponse;
     return Response.json(
       {
         artist_id: parsed.artist_id,

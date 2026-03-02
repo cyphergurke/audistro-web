@@ -4,8 +4,9 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "next build --webpack",
     "start": "next start",
+    "gen:openapi": "mkdir -p src/gen && npx -y openapi-typescript@7.10.1 ../audistro-fap/api/openapi.v1.yaml -o src/gen/fap.ts && npx -y openapi-typescript@7.10.1 ../audistro-catalog/api/openapi.v1.yaml -o src/gen/catalog.ts && npx -y openapi-typescript@7.10.1 ../audistro-provider/api/openapi.v1.yaml -o src/gen/provider.ts",
     "typecheck": "tsc --noEmit",
     "lint": "next lint",
     "lint:fix": "next lint --fix",

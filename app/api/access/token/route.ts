@@ -1,13 +1,18 @@
 import {
+  APIClientError,
+  createAPIClient
+} from "@/src/lib/apiClient";
+import type { paths as CatalogPaths } from "@/src/gen/catalog";
+import type { paths as FAPPaths } from "@/src/gen/fap";
+import {
   classifyTokenExchangeConflict,
   extractAccessFapURL,
-  parseChallengeId,
-  parseTokenExchangeSuccess
+  parseChallengeId
 } from "@/lib/accessServer";
+import type { PlaybackResponse } from "@/lib/types";
 import {
   boostRequestTimeoutMs,
   parseAssetId,
-  parsePlaybackResponse,
   resolveReachableFapUrl
 } from "@/lib/boostServer";
 import { getServerEnv } from "@/lib/env";
@@ -27,91 +32,94 @@ export async function POST(req: Request): Promise<Response> {
     const challengeId = parseChallengeId(String(body.challengeId ?? ""));
     const { catalogBaseUrl, fapBaseUrl } = getServerEnv();
     const inboundCookie = req.headers.get("cookie") ?? "";
+    const catalogClient = createAPIClient<CatalogPaths>(catalogBaseUrl);
 
-    const playbackURL = new URL(`/v1/playback/${encodeURIComponent(assetId)}`, catalogBaseUrl).toString();
-    const playbackController = new AbortController();
-    const playbackTimeout = setTimeout(() => playbackController.abort(), boostRequestTimeoutMs);
-    const playbackUpstream = await fetch(playbackURL, {
-      method: "GET",
-      cache: "no-store",
-      signal: playbackController.signal
-    });
-    clearTimeout(playbackTimeout);
-    const playbackText = await playbackUpstream.text();
-    const playbackContentType = playbackUpstream.headers.get("content-type") ?? "application/json";
-    if (playbackUpstream.status !== 200) {
-      return new Response(playbackText, {
-        status: playbackUpstream.status,
-        headers: {
-          "Content-Type": playbackContentType,
-          "Cache-Control": "no-store"
-        }
+    let playback: PlaybackResponse;
+    try {
+      const playbackResult = await catalogClient.requestJSON<"get", "/v1/playback/{assetId}", PlaybackResponse>({
+        method: "get",
+        path: "/v1/playback/{assetId}",
+        pathParams: { assetId },
+        timeoutMs: boostRequestTimeoutMs
       });
+      playback = playbackResult.data;
+    } catch (error: unknown) {
+      if (error instanceof APIClientError) {
+        const response = new Response(error.bodyText, {
+          status: error.status,
+          headers: {
+            "Content-Type": error.contentType || "application/json",
+            "Cache-Control": "no-store"
+          }
+        });
+        if (error.setCookie) {
+          response.headers.set("set-cookie", error.setCookie);
+        }
+        return response;
+      }
+      throw error;
     }
 
-    const playback = parsePlaybackResponse(playbackText);
     const catalogFapURL = extractAccessFapURL(assetId, playback);
     const reachableFapBaseURL = resolveReachableFapUrl(catalogFapURL, fapBaseUrl);
-    const tokenURL = new URL("/v1/fap/token", reachableFapBaseURL).toString();
+    const fapClient = createAPIClient<FAPPaths>(reachableFapBaseURL);
 
-    const tokenController = new AbortController();
-    const tokenTimeout = setTimeout(() => tokenController.abort(), boostRequestTimeoutMs);
-    const tokenUpstream = await fetch(tokenURL, {
-      method: "POST",
-      cache: "no-store",
-      signal: tokenController.signal,
-      headers: {
-        "Content-Type": "application/json",
-        cookie: inboundCookie
-      },
-      body: JSON.stringify({
-        challenge_id: challengeId
-      })
-    });
-    clearTimeout(tokenTimeout);
-    const tokenText = await tokenUpstream.text();
-    const tokenContentType = tokenUpstream.headers.get("content-type") ?? "application/json";
-    const tokenSetCookie = tokenUpstream.headers.get("set-cookie");
-
-    if (tokenUpstream.status === 200) {
-      const paid = parseTokenExchangeSuccess(tokenText);
+    try {
+      const tokenResult = await fapClient.requestJSON({
+        method: "post",
+        path: "/v1/fap/token",
+        cookie: inboundCookie,
+        timeoutMs: boostRequestTimeoutMs,
+        json: {
+          challenge_id: challengeId
+        }
+      });
+      const paid = {
+        status: "paid" as const,
+        access_token: tokenResult.data.token,
+        expires_at: tokenResult.data.expires_at,
+        resource_id: tokenResult.data.resource_id
+      };
       const response = NextResponse.json(paid, {
         status: 200,
         headers: {
           "Cache-Control": "no-store"
         }
       });
-      if (tokenSetCookie) {
-        response.headers.set("set-cookie", tokenSetCookie);
+      if (tokenResult.setCookie) {
+        response.headers.set("set-cookie", tokenResult.setCookie);
       }
       return response;
-    }
+    } catch (error: unknown) {
+      if (!(error instanceof APIClientError)) {
+        throw error;
+      }
+      if (error.status === 409) {
+        const classified = classifyTokenExchangeConflict(error.bodyText);
+        const response = NextResponse.json(classified, {
+          status: 200,
+          headers: {
+            "Cache-Control": "no-store"
+          }
+        });
+        if (error.setCookie) {
+          response.headers.set("set-cookie", error.setCookie);
+        }
+        return response;
+      }
 
-    if (tokenUpstream.status === 409) {
-      const classified = classifyTokenExchangeConflict(tokenText);
-      const response = NextResponse.json(classified, {
-        status: 200,
+      const response = new Response(error.bodyText, {
+        status: error.status,
         headers: {
+          "Content-Type": error.contentType || "application/json",
           "Cache-Control": "no-store"
         }
       });
-      if (tokenSetCookie) {
-        response.headers.set("set-cookie", tokenSetCookie);
+      if (error.setCookie) {
+        response.headers.set("set-cookie", error.setCookie);
       }
       return response;
     }
-
-    const response = new Response(tokenText, {
-      status: tokenUpstream.status,
-      headers: {
-        "Content-Type": tokenContentType,
-        "Cache-Control": "no-store"
-      }
-    });
-    if (tokenSetCookie) {
-      response.headers.set("set-cookie", tokenSetCookie);
-    }
-    return response;
   } catch (err: unknown) {
     if (err instanceof Error) {
       return NextResponse.json({ error: err.message }, { status: 400 });
