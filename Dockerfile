@@ -5,15 +5,14 @@ ENV PNPM_HOME=/pnpm
 ENV PNPM_STORE_DIR=/pnpm/store
 ENV PATH=${PNPM_HOME}:${PATH}
 WORKDIR /app
+RUN npm install -g pnpm@10.9.2
 
 FROM base AS deps
-RUN npm install -g pnpm@10.9.2
 COPY package.json pnpm-lock.yaml ./
 RUN --mount=type=cache,target=/pnpm/store \
     sh -lc 'for attempt in 1 2 3 4 5; do pnpm fetch --frozen-lockfile && exit 0; sleep $((attempt * 2)); done; exit 1'
 
 FROM base AS builder
-RUN npm install -g pnpm@10.9.2
 COPY --from=deps /pnpm/store /pnpm/store
 COPY package.json pnpm-lock.yaml ./
 RUN --mount=type=cache,target=/pnpm/store \
@@ -21,16 +20,10 @@ RUN --mount=type=cache,target=/pnpm/store \
 COPY . .
 RUN pnpm build
 
-FROM node:24-bookworm-slim AS runner
-ENV PNPM_HOME=/pnpm
-ENV PNPM_STORE_DIR=/pnpm/store
-ENV PATH=${PNPM_HOME}:${PATH}
+FROM base AS runner
 ENV NODE_ENV=production
 ENV PORT=3000
 ENV HOSTNAME=0.0.0.0
-WORKDIR /app
-
-RUN npm install -g pnpm@10.9.2
 COPY --from=deps /pnpm/store /pnpm/store
 COPY --from=builder /app/package.json ./package.json
 COPY --from=builder /app/pnpm-lock.yaml ./pnpm-lock.yaml
